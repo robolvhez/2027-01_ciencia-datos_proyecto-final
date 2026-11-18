@@ -1,186 +1,154 @@
-# background
+# Protocolo Técnico: Estandarización de MCPS hacia OMOP CDM v5.4 en DNAnexus
 
-# OMOP specifications - Chapter 4
-
-Data Model: https://ohdsi.github.io/TheBookOfOhdsi/CommonDataModel.html
-
-![](img/cdmDiagram.png)
-
-Data available in DGI BD that fits the model:
-
-## White Rabbit
-
-
-## Usagi — Pasos para mapear datos de Egresos Hospitalarios SSA (2023–2025)
-
-### Situación de los datos
-
-Los datos provienen de la base de **Egresos Hospitalarios de la Secretaría de Salud** y contienen **4 tablas** (EGRESO, AFECCIONES, PROCEDIMIENTOS, PRODUCTOS). Los códigos médicos que necesitan mapeo a vocabulario estándar (OMOP/SNOMED/RxNorm) a través de Usagi son:
-
-| Campo | Tabla | Sistema de codificación | Dominio OMOP sugerido |
-|---|---|---|---|
-| `DIAG_INI` | EGRESO | CIE-10 (2021) | Condition |
-| `AFECPRIN` | EGRESO | CIE-10 (2021) | Condition |
-| `CAUSAEXT` | EGRESO | CIE-10 (2021 — capítulos V–Y) | Observation |
-| `AFEC` | AFECCIONES | CIE-10 (2021) | Condition |
-| `PROMED` | PROCEDIMIENTOS | CIE-9-MC (2023) | Procedure |
+## 1. Justificación del Cambio de Alcance (De DGIS/ENSANUT a MCPS)
 
 > [!IMPORTANT]
-> Usagi requiere que **separes tus códigos por dominio** en archivos independientes. No debes mezclar diagnósticos con procedimientos en un solo archivo.
+> **Decisión de Arquitectura (Noviembre 2026):** Se reestructura el proyecto para descartar el uso de bases abiertas intermedias (**DGIS — Egresos Hospitalarios** o **ENSANUT**) y construir el pipeline ETL **directamente sobre el Mexico City Prospective Study (MCPS)**.
+
+### ¿Por qué descartar DGIS o ENSANUT en este proyecto?
+1. **Escala y complejidad desproporcionadas:** Tanto los registros nacionales de **Egresos Hospitalarios de la DGIS** como las rondas de la **ENSANUT** constituyen bases de datos masivas, heterogéneas y orientadas a fines administrativos o encuestas poblacionales multipropósito. Armonizar la totalidad de sus catálogos (miles de códigos CIE-10, procedimientos CIE-9-MC, causas externas y cuestionarios cambiantes por año) representa un **proyecto independiente mucho más amplio** que excede los objetivos de este trabajo.
+2. **Curva de aprendizaje sobre una base ajena vs. dominio directo de MCPS:** Invertir el tiempo del proyecto en descifrar las particularidades administrativas de una base externa desconocida desvía el esfuerzo del objetivo científico real. En cambio, el autor ya trabaja directamente con **MCPS**, conoce a fondo su estructura y variables, y cuenta con acceso autorizado a los datos.
+3. **Alineación directa con el objetivo científico ("Conectar MCPS a OMOP/SNOMED"):** El propósito central dentro de la investigación doctoral es estandarizar los fenotipos metabólicos y antropométricos de MCPS en **OMOP CDM v5.4** (usando **SNOMED CT** y **LOINC**) para habilitar meta-análisis de GWAS basados en familias (*FGWAS*) comparables con cohortes internacionales (p. ej., UK Biobank). Trabajar directamente sobre MCPS resuelve el problema real desde el primer día.
 
 ---
 
-## Pasos concretos
+## 2. Entorno de Ejecución y Gobernanza de Datos Protegidos (DNAnexus)
 
-### Paso 0 — Pre-requisitos
+> [!CAUTION]
+> **Datos Protegidos — Regla de Cero Fuga de Datos:** Los datos de **MCPS** contienen información clínica, demográfica y genómica a nivel individual protegida bajo acuerdos de acceso (*Data Access Agreement*). **Ningún dato individual, extracto crudo ni base de datos poblada puede salir de DNAnexus ni subirse a Git.**
 
-1. **Descargar el vocabulario OMOP** desde [Athena](https://athena.ohdsi.org/). Necesitas al menos:
-   - SNOMED (para condiciones/diagnósticos)
-   - ICD10 / ICD10CM (para poder aprovechar la similitud con CIE-10)
-   - ICD9Proc (para procedimientos CIE-9-MC)
-2. **Instalar Usagi** desde [GitHub OHDSI/Usagi](https://github.com/OHDSI/Usagi) y construir el índice con los vocabularios descargados (`Help → Rebuild index`).
+### Implicaciones operativas de trabajar en un servidor de DNAnexus
+1. **Procesamiento 100% remoto:** Toda la exploración de datos, transformación ETL, carga en base de datos y ejecución de consultas SQL de cohortes se realiza dentro de un servidor/instancia de **DNAnexus** (entorno Linux remoto accedido por terminal SSH / CLI `dx-toolkit` o JupyterLab).
+2. **Separación estricta entre código y datos:**
+   - **En este repositorio Git:** Únicamente viven el código fuente (`src/python/mcps_etl`), los esquemas DDL y consultas SQL (`src/sql/`), las tablas de mapeo semántico sin datos de pacientes (`SOURCE_TO_CONCEPT_MAP`), la documentación (`docs/`) y pruebas unitarias con **datos sintéticos** (`tests/`).
+   - **En el servidor DNAnexus:** Residen los archivos planos crudos de MCPS (CSV/Parquet), los archivos del vocabulario descargados de Athena y la instancia de base de datos con el modelo OMOP CDM v5.4 poblado.
+3. **Ausencia de interfaz gráfica (Sin GUI para `Usagi` o `WhiteRabbit`):**
+   - Al trabajar dentro de un servidor Linux remoto en DNAnexus sin entorno de escritorio gráfico, **no es posible ejecutar aplicaciones interactivas de escritorio (Java Swing/GUI) como `Usagi` o `WhiteRabbit`** directamente sobre el servidor.
+   - Todo el flujo de perfilado y mapeo de códigos fuente hacia conceptos estándar de OMOP/SNOMED/LOINC debe ejecutarse mediante **herramientas de línea de comandos (CLI), scripts en Python y consultas SQL** (ver Sección 4).
 
-### Paso 1 — Extraer y preparar los códigos fuente
+---
 
-Necesitas generar **3 archivos CSV/Excel separados**, uno por dominio:
+## 3. Especificación del Modelo OMOP CDM v5.4 para MCPS
 
-#### Archivo 1: Diagnósticos / Condiciones (CIE-10)
-Extraer los códigos únicos de los campos `DIAG_INI`, `AFECPRIN` y `AFEC`, junto con sus descripciones en español (del catálogo `CAT_CIE_10_2021`) y una **traducción al inglés**.
+Referencia oficial: [The Book of OHDSI — Chapter 4: The Common Data Model](https://ohdsi.github.io/TheBookOfOhdsi/CommonDataModel.html)
 
-| source_code | source_name_es | source_name_en | frequency |
+![Diagrama OMOP CDM](img/cdmDiagram.png)
+
+### Naturaleza de los datos de MCPS y su ajuste a OMOP CDM
+**MCPS** reclutó a ~150,000 adultos ($\ge 35$ años; ~140,000 con genotipado) en Coyoacán e Iztapalapa (Ciudad de México) entre **1998 y 2004**, con una encuesta de re-evaluación (*resurvey*) en ~10,000 participantes (2015–2019) y seguimiento longitudinal continuo mediante vinculación con el registro nacional de mortalidad codificado en **CIE-10**.
+
+| Tabla destino en OMOP CDM | Fuente en MCPS | Variables clave de MCPS | Vocabulario estándar destino |
 |---|---|---|---|
-| A00 | CÓLERA | Cholera | 15 |
-| A000 | CÓLERA DEBIDO A VIBRIO CHOLERAE 01, BIOTIPO CHOLERAE | Cholera due to Vibrio cholerae 01, biotype cholerae | 3 |
-
-> [!TIP]
-> - Combina los 3 campos (`DIAG_INI`, `AFECPRIN`, `AFEC`) en una sola lista de códigos únicos para este archivo, ya que todos pertenecen al dominio **Condition**.
-> - Incluye la **frecuencia** de cada código (cuántas veces aparece en tu dataset) para priorizar el esfuerzo de revisión.
-> - Usa **Google Translate** para traducir las descripciones del español al inglés. Usagi trabaja con similitud textual en inglés.
-
-#### Archivo 2: Causas externas (CIE-10, capítulos V–Y)
-Extraer códigos únicos de `CAUSAEXT`:
-
-| source_code | source_name_es | source_name_en | frequency |
-|---|---|---|---|
-| V010 | PEATÓN LESIONADO POR COLISIÓN CON VEHÍCULO DE PEDAL... | Pedestrian injured in collision with pedal cycle... | 8 |
-| W000 | CAÍDA EN EL MISMO NIVEL POR HIELO O NIEVE, VIVIENDA | Fall on same level from ice and snow, dwelling | 2 |
-
-> [!NOTE]
-> Las causas externas generalmente mapean al dominio **Observation** en OMOP, no a Condition. Mantenlos en un archivo separado.
-
-#### Archivo 3: Procedimientos (CIE-9-MC)
-Extraer códigos únicos de `PROMED` (del catálogo `CATCIE9MC_2023`):
-
-| source_code | source_name_es | source_name_en | procedure_type | frequency |
-|---|---|---|---|---|
-| 0001 | ULTRASONIDO TERAPÉUTICO DE VASOS DE CABEZA Y CUELLO | Therapeutic ultrasound of head and neck vessels | D | 42 |
-| 0031 | CIRUGÍA ASISTIDA POR ORDENADOR CON TAC/TC | Computer assisted surgery with CT/TC | Q | 7 |
-
-> [!TIP]
-> El campo `TIPO` (D=Diagnósticos, Q=Quirúrgicos, T=Terapéuticos, F=Mixto) es información adicional útil para el revisor. Inclúyelo como columna "Additional info".
+| `person` | Tabla demográfica basal | `PATID` (ID participante), `MALE`/`SEX`, `AGE`, fecha de reclutamiento (`1998–2004`), distrito (`COYOACAN`/`IZTAPALAPA`) | `Gender` (`8507` Male, `8532` Female), `Race` / `Ethnicity` |
+| `observation_period` | Fechas de seguimiento | Inicio: fecha de visita basal (`BASE_DATE`). Fin: fecha de defunción o fecha de corte de seguimiento | `Period Type` (`32880` Standardized health system data / cohort study) |
+| `visit_occurrence` | Evaluación basal y *resurvey* | Visita de reclutamiento basal (1998–2004) y visita de re-contacto (si aplica) | `Visit` (Outpatient / Study visit) |
+| `measurement` | Antropometría, presión arterial y bioquímica / RMN | `BMI` (IMC), `HEIGHT` (estatura), `WEIGHT` (peso), `WAIST` (cintura), `HIP` (cadera), `SBP1..3` (PAS), `DBP1..3` (PAD), `HBA1C`, glucosa, lípidos, metabolitos RMN | **LOINC** / **SNOMED** (`domain_id = 'Measurement'`) + **UCUM** para unidades (`kg/m2`, `cm`, `kg`, `mm[Hg]`, `%`) |
+| `condition_occurrence` | Cuestionario clínico basal y episodios vinculados | Diagnósticos previos autorreportados en visita basal (diabetes, hipertensión, infarto, EVC, ERC, cáncer) y condiciones CIE-10 | **SNOMED CT** (`domain_id = 'Condition'`) |
+| `death` | Seguimiento de mortalidad vinculada | Fecha de defunción (`DOD`), causa básica de muerte y causas contribuyentes codificadas en **CIE-10** | **SNOMED CT** (vía mapeo `ICD10` → `SNOMED` en Athena) |
+| `drug_exposure` | Medicación basal autorreportada | Uso de hipoglucemiantes orales, insulina, antihipertensivos, estatinas/hipolipemiantes | **RxNorm** / **ATC** |
+| `observation` | Estilo de vida y socioeconómicos | Tabaquismo, consumo de alcohol, actividad física, escolaridad, ingreso | **SNOMED CT** / **LOINC** (`domain_id = 'Observation'`) |
 
 ---
 
-### Paso 2 — Importar en Usagi
+## 4. Estrategia de Mapeo Semántico sin GUI (Reemplazo Headless de `Usagi` en DNAnexus)
 
-Para **cada archivo** (repite para los 3):
+Dado que en el servidor de DNAnexus no contamos con GUI para abrir `Usagi`, el mapeo hacia `SOURCE_TO_CONCEPT_MAP` se divide en **tres vías complementarias** operables 100% desde terminal/Python/SQL:
 
-1. Abre Usagi → `File → Import codes`
-2. En **Column mapping** (abajo izquierda):
-   - **Source code column**: `source_code`
-   - **Source name column**: `source_name_en` (la traducción al inglés)
-   - **Source frequency column**: `frequency`
-   - **Additional info**: `source_name_es` (para referencia del revisor)
-3. En **Filters** (abajo derecha), configura según el archivo:
+### Vía 1 — Mapeo automático por Crosswalk Oficial de Athena (Códigos CIE-10)
+Los registros de mortalidad vinculada de MCPS ya están codificados en **CIE-10 (ICD-10)**. Para estos códigos **no se requiere Usagi**: el vocabulario oficial de Athena ya incluye las relaciones validadas `ICD10` → `SNOMED`.
 
-| Archivo | Filtro de dominio | Vocabulario destino |
-|---|---|---|
-| Diagnósticos (CIE-10) | **Condition** | SNOMED |
-| Causas externas (CIE-10) | **Observation** | SNOMED |
-| Procedimientos (CIE-9-MC) | **Procedure** | SNOMED |
+El cruce se realiza directamente en SQL o Python usando las tablas `CONCEPT` y `CONCEPT_RELATIONSHIP`:
 
-4. Click **Import** — espera a que termine el algoritmo de similitud.
+```sql
+SELECT
+    c_src.concept_code       AS icd10_source_code,
+    c_src.concept_id         AS source_concept_id,
+    c_src.concept_name       AS icd10_name,
+    c_tar.concept_id         AS target_concept_id,
+    c_tar.concept_name       AS snomed_standard_name,
+    c_tar.domain_id          AS target_domain_id
+FROM concept c_src
+JOIN concept_relationship cr
+  ON c_src.concept_id = cr.concept_id_1
+ AND cr.relationship_id = 'Maps to'
+ AND cr.invalid_reason IS NULL
+JOIN concept c_tar
+  ON cr.concept_id_2 = c_tar.concept_id
+ AND c_tar.standard_concept = 'S'
+ AND c_tar.invalid_reason IS NULL
+WHERE c_src.vocabulary_id IN ('ICD10', 'ICD10CM');
+```
 
----
+### Vía 2 — Diccionario Curado para Fenotipos Prioritarios (`SOURCE_TO_CONCEPT_MAP`)
+A diferencia de una base abierta con miles de códigos desconocidos, las variables basales de MCPS provienen de un **cuestionario estructurado y cerrado**. Para los fenotipos cardiometabólicos y antropométricos núcleo del proyecto, se construye y versiona en Git una tabla CSV (`SOURCE_TO_CONCEPT_MAP`) con mapeo directo a conceptos estándar de **LOINC** y **SNOMED CT**:
 
-### Paso 3 — Revisar y aprobar mapeos
+| Variable MCPS (`source_code`) | Descripción | Dominio OMOP | Vocabulario estándar | `target_concept_id` | Concepto estándar (`concept_name`) | Unidad (`unit_concept_id` / UCUM) |
+|---|---|---|---|---|---|---|
+| `BMI` | Índice de masa corporal ($\text{kg/m}^2$) | `Measurement` | LOINC | `3038553` | Body mass index (BMI) [Ratio] | `9531` (`kg/m2`) |
+| `HEIGHT` | Estatura de pie ($\text{cm}$) | `Measurement` | LOINC | `3036277` | Body height | `8582` (`cm`) |
+| `WEIGHT` | Peso corporal ($\text{kg}$) | `Measurement` | LOINC | `3025315` | Body weight | `9529` (`kg`) |
+| `WAIST_CIRC` | Circunferencia de cintura ($\text{cm}$) | `Measurement` | LOINC | `40759207` / `4172830` | Waist circumference | `8582` (`cm`) |
+| `SBP` | Presión arterial sistólica ($\text{mmHg}$) | `Measurement` | LOINC | `3004249` | Systolic blood pressure | `8876` (`mm[Hg]`) |
+| `DBP` | Presión arterial diastólica ($\text{mmHg}$) | `Measurement` | LOINC | `3012888` | Diastolic blood pressure | `8876` (`mm[Hg]`) |
+| `HBA1C` | Hemoglobina glucosilada HbA1c ($\%$) | `Measurement` | LOINC | `3004410` | Hemoglobin A1c/Hemoglobin.total in Blood | `8554` (`%`) |
+| `BASE_DIABETES` | Diagnóstico previo de diabetes (autorreporte) | `Condition` | SNOMED | `201826` / `201820` | Type 2 diabetes mellitus / Diabetes mellitus | N/A |
+| `BASE_HYPERTENSION` | Diagnóstico previo de hipertensión (autorreporte) | `Condition` | SNOMED | `316866` | Hypertensive disorder | N/A |
 
-> [!IMPORTANT]
-> Idealmente, una persona con experiencia en terminología médica y los sistemas de codificación (CIE-10, CIE-9-MC) debe participar en esta revisión.
+### Vía 3 — Mapeo Programático en CLI (Equivalente Headless a `Usagi`)
+Cuando se requiera mapear un lote amplio de variables adicionales del cuestionario o metabolitos de RMN sin acceso a GUI:
 
-1. **Ordena por frecuencia** (`Frequency` descendente) para priorizar los códigos más usados.
-2. **Revisa código por código**:
-   - Si el mapeo sugerido es correcto → click **Approve** ✅
-   - Si no es correcto → usa el buscador para encontrar un mejor concepto → **Replace concept** → **Approve**
-   - Si no hay concepto adecuado → dejar como `CONCEPT_ID = 0` (está bien para códigos raros)
-3. **Usa la información del concepto** (`ALT + C`) para verificar la "vida social" del concepto: sus padres, hijos y relaciones jerárquicas.
-4. **Agrega comentarios** a los mapeos difíciles para documentar tus decisiones.
-
-#### Consideraciones especiales para estos datos:
-
-- **CIE-10 mexicana (2021)**: Es una adaptación de ICD-10, muy cercana pero con algunas diferencias. Usagi debería mapear bien la mayoría de códigos por similitud textual con ICD10/ICD10CM.
-- **CIE-9-MC (2023)**: Es la versión mexicana de ICD-9-CM Procedures. Usagi buscará equivalentes en el vocabulario de procedimientos SNOMED/CPT4.
-- **Códigos con score > 0.7**: Probablemente correctos, pero siempre verificar.
-- **Códigos con score < 0.5**: Requieren revisión manual cuidadosa.
-
----
-
-### Paso 4 — Exportar el mapeo
-
-1. `File → Export source_to_concept_map`
-2. Define un **SOURCE_VOCABULARY_ID** para cada archivo:
-   - `SSA_CIE10_DX` para diagnósticos
-   - `SSA_CIE10_EXT` para causas externas
-   - `SSA_CIE9MC_PX` para procedimientos
-3. Guarda el CSV resultante.
-4. Solo los mapeos con estatus **"Approved"** se exportarán.
-
----
-
-### Paso 5 — Cargar en OMOP CDM
-
-1. Agrega los CSV exportados a la tabla `SOURCE_TO_CONCEPT_MAP` del vocabulario.
-2. Agrega una fila por cada `SOURCE_VOCABULARY_ID` nuevo en la tabla `VOCABULARY`.
+1. **En el servidor DNAnexus (Python CLI):**
+   - Se extraen únicamente los metadatos del diccionario de variables (`source_code`, `source_description_en`, `domain_id`).
+   - Un script de Python (`src/python/mcps_etl/`) utiliza similitud de texto (`rapidfuzz` o `pg_trgm` / `tsvector` dentro de PostgreSQL) contra las tablas `CONCEPT` y `CONCEPT_SYNONYM` de Athena (filtrando `standard_concept = 'S'` y el `domain_id` correspondiente).
+   - El script exporta un archivo CSV con los $k$ mejores candidatos y su *similarity score*, replicando el índice de Lucene de Usagi pero desde terminal.
+   - La revisión y aprobación (`status = 'APPROVED'`) se realiza editando el CSV (en terminal, JupyterLab o mediante PR en Git) y se exporta al esquema exacto de `SOURCE_TO_CONCEPT_MAP`.
+2. **Alternativa híbrida sobre metadatos públicos (0% datos de pacientes):**
+   - Dado que el **diccionario de variables de MCPS** (nombres de columnas y etiquetas de preguntas, sin filas de participantes) es metadato público (documentado en el *MCPS Data Showcase*), si en algún momento se desea usar la interfaz de `Usagi` en una computadora local, puede ejecutarse **exclusivamente sobre el catálogo vacío de nombres de variables** y subir el archivo `source_to_concept_map.csv` resultante al repositorio / servidor DNAnexus.
 
 ---
 
-## Campos que NO necesitan Usagi
-
-Los siguientes campos del dataset ya son **códigos categóricos simples** con catálogos cerrados y no requieren mapeo a través de Usagi. Se mapean directamente en el ETL:
-
-| Campo | Descripción | Mapeo directo |
-|---|---|---|
-| `SEXO` | Sexo del paciente | → `concept_id` de OMOP Gender |
-| `CVEEDAD` | Tipo de unidad de edad | Lógica ETL directa |
-| `EDAD` | Edad numérica | Campo numérico en OMOP |
-| `MOTEGRE` | Motivo de egreso | Mapeo manual (5-8 valores) |
-| `DERHAB` | Derechohabiencia | Mapeo manual |
-| `TIPSERV` | Tipo de servicio | Mapeo manual |
-| `ENTIDAD/MUNIC/LOC` | Geografía | → `location` table |
-| `INFEC` | Infección intrahospitalaria | Sí/No → flag |
-| Campos obstétricos | `GESTAS`, `PARTOS`, `TIPNACI`, etc. | Mapeo manual (catálogos pequeños) |
-
-> [!NOTE]
-> Estos catálogos pequeños (< 15 valores) se mapean manualmente dentro del código ETL, no con Usagi.
-
----
-
-## Resumen visual del flujo
+## 5. Flujo de Trabajo Completo en DNAnexus
 
 ```mermaid
 flowchart TD
-    A["Base de Egresos SSA"] --> B["Extraer códigos únicos"]
-    B --> C1["CSV: Diagnósticos CIE-10\n(DIAG_INI + AFECPRIN + AFEC)"]
-    B --> C2["CSV: Causas externas CIE-10\n(CAUSAEXT)"]
-    B --> C3["CSV: Procedimientos CIE-9-MC\n(PROMED)"]
-    
-    C1 --> D["Traducir descripciones\nal inglés (Google Translate)"]
-    C2 --> D
-    C3 --> D
-    
-    D --> E["Importar en Usagi\n(un archivo a la vez)"]
-    E --> F["Revisar mapeos sugeridos\n(priorizar por frecuencia)"]
-    F --> G["Aprobar / Reemplazar / CONCEPT_ID=0"]
-    G --> H["Exportar SOURCE_TO_CONCEPT_MAP"]
-    H --> I["Cargar en OMOP CDM"]
+    subgraph Git["Repositorio Git (Código y Metadatos)"]
+        G1["src/python/mcps_etl\n(Pipeline ETL + Mapper CLI)"]
+        G2["src/sql/\n(DDL OMOP v5.4 + Cohort Queries)"]
+        G3["SOURCE_TO_CONCEPT_MAP\n(Diccionario curado MCPS -> SNOMED/LOINC)"]
+        G4["tests/\n(Pruebas con datos sintéticos)"]
+    end
+
+    subgraph DNAnexus["Servidor Seguro DNAnexus (Datos Protegidos)"]
+        D1[("Datos Crudos MCPS\n(Basal, Bioquímica, Mortalidad CIE-10)")]
+        D2[("Vocabularios Athena\n(SNOMED, LOINC, ICD10, RxNorm)")]
+        D3["Ejecución Headless de mcps-etl\n(Python + SQLAlchemy)"]
+        D4[("Base de Datos OMOP CDM v5.4\n(person, measurement, condition, death)")]
+        D5["Definición de Cohortes SQL\n(DT2, Obesidad, Fenotipos FGWAS)"]
+    end
+
+    G1 -->|git pull en DNAnexus| D3
+    G2 -->|git pull en DNAnexus| D4
+    G3 -->|git pull en DNAnexus| D3
+    D1 --> D3
+    D2 --> D4
+    D3 --> D4
+    D4 --> D5
 ```
+
+---
+
+## 6. Pasos de Implementación
+
+1. **Fase 1 — Infraestructura y Esquema OMOP CDM v5.4:**
+   - Configurar scripts SQL del DDL de OMOP CDM v5.4 y carga de vocabularios de Athena (`SNOMED`, `LOINC`, `ICD10`, `UCUM`, `RxNorm`).
+   - Preparar generador de **datos sintéticos** con la misma estructura de columnas de MCPS para ejecutar pruebas locales y en GitHub Actions sin tocar datos reales.
+2. **Fase 2 — Mapeo Semántico Headless (`SOURCE_TO_CONCEPT_MAP`):**
+   - Consolidar el archivo `source_to_concept_map.csv` para las variables basales de MCPS (antropometría, presión arterial, HbA1c, comorbilidades basales) hacia **LOINC** y **SNOMED CT**.
+   - Implementar la consulta/módulo de cruce automático `ICD10` → `SNOMED` usando `CONCEPT_RELATIONSHIP` para las causas de defunción.
+3. **Fase 3 — Desarrollo del ETL (`src/python/mcps_etl`):**
+   - Transformación de tabla basal a `person`, `observation_period` y `visit_occurrence`.
+   - Transformación en formato largo (*melt/unpivot*) de mediciones cuantitativas (`BMI`, `HEIGHT`, `WEIGHT`, `SBP`, `DBP`, `HBA1C`) hacia `measurement`.
+   - Transformación de diagnósticos basales y mortalidad vinculada hacia `condition_occurrence` y `death`.
+4. **Fase 4 — Cohortes SQL y Validación de Calidad:**
+   - Escribir consultas SQL reproducibles para definir cohortes clínicas (ej. Diabetes Tipo 2 y Obesidad) con tabla de atrición (*attrition table*).
+   - Ejecutar validaciones automatizadas de integridad referencial y cobertura de mapeo en el servidor de DNAnexus.

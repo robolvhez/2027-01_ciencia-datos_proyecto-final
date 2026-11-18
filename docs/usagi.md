@@ -1,4 +1,10 @@
 
+> [!WARNING]
+> **Nota para el entorno de MCPS en DNAnexus (Sin GUI):**
+> Este documento conserva la referencia oficial de *The Book of OHDSI* (Sección 6.3.1) sobre el funcionamiento conceptual de **Usagi** y la estructura de la tabla `SOURCE_TO_CONCEPT_MAP`.
+> Sin embargo, dado que los datos de **MCPS** son datos protegidos y todo el procesamiento se realiza dentro de un **servidor Linux remoto en DNAnexus sin interfaz gráfica (headless)**, no es posible ejecutar la GUI interactiva de Usagi directamente sobre los datos en el servidor.
+> Consulta [protocol.md](protocol.md#4-estrategia-de-mapeo-semántico-sin-gui-reemplazo-headless-de-usagi-en-dnanexus) para ver el flujo **headless / CLI** adoptado en este proyecto (cruces SQL directos con `CONCEPT_RELATIONSHIP` de Athena para CIE-10, tablas curadas `SOURCE_TO_CONCEPT_MAP` en CSV y similitud textual programática en Python con `rapidfuzz`).
+
 ### 6.3.1 Usagi
 
 Usagi is a tool to aid the manual process of creating a code mapping. It can make suggested mappings based on textual similarity of code descriptions. If the source codes are only available in a foreign language, we have found that Google Translate[^33^](https://ohdsi.github.io/TheBookOfOhdsi/ExtractTransformLoad.html#fn33) often gives surprisingly good translation of the terms into English. Usagi allows the user to search for the appropriate target concepts if the automated suggestion is not correct. Finally, the user can indicate which mappings are approved to be used in the ETL. Usagi is available on GitHub.[^34^](https://ohdsi.github.io/TheBookOfOhdsi/ExtractTransformLoad.html#fn34)
