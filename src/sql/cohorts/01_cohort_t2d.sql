@@ -3,6 +3,16 @@
 --   Condition: SNOMED 73211009 (OMOP 201820: Diabetes mellitus) or 44054006 (OMOP 201826: Type 2 diabetes mellitus)
 --   Measurement: LOINC 4548-4 (OMOP 3004410: HbA1c >= 6.5%) or 59261-8 (OMOP 40762352: HbA1c >= 48 mmol/mol)
 
+INSERT OR REPLACE INTO cohort_definition (
+    cohort_definition_id,
+    cohort_definition_name,
+    cohort_definition_description
+) VALUES (
+    1,
+    'T2D (17_03_01)',
+    'Type 2 Diabetes: SNOMED 73211009/44054006 (OMOP 201820/201826) or LOINC HbA1c >= 6.5% (OMOP 3004410) / >= 48 mmol/mol (OMOP 40762352)'
+);
+
 DELETE FROM cohort WHERE cohort_definition_id = 1;
 
 INSERT INTO cohort (cohort_definition_id, subject_id, cohort_start_date, cohort_end_date)

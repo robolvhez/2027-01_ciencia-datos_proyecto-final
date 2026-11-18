@@ -203,3 +203,25 @@ def test_genotyped_gwas_catalog_format_and_cli(tmp_path: Path) -> None:
         ]
         assert t2d_iids == ["MCPS_MCPSRGN000002_MEXB000301"]
         assert obe_iids == ["MCPS_MCPSRGN000001_MEXB000300"]
+
+    from src.python.mcps_etl.__main__ import run_cohorts_summary
+
+    custom_cohorts_dir = tmp_path / "custom_cohorts"
+    custom_cohorts_dir.mkdir()
+    (custom_cohorts_dir / "99_custom.sql").write_text(
+        """
+        INSERT OR REPLACE INTO cohort_definition (cohort_definition_id, cohort_definition_name)
+        VALUES (99, 'Custom Tall Cohort (Height >= 150)');
+        DELETE FROM cohort WHERE cohort_definition_id = 99;
+        INSERT INTO cohort (cohort_definition_id, subject_id, cohort_start_date, cohort_end_date)
+        SELECT 99, m.person_id, m.measurement_date, m.measurement_date
+        FROM measurement m
+        WHERE m.measurement_concept_id = 3036277 AND m.value_as_number >= 150.0;
+        """,
+        encoding="utf-8",
+    )
+
+    summary = run_cohorts_summary(f"sqlite:///{db_path}", cohorts_dir=custom_cohorts_dir)
+    custom_entry = next(r for r in summary if r["cohort_definition_id"] == 99)
+    assert custom_entry["phenotype"] == "Custom Tall Cohort (Height >= 150)"
+    assert custom_entry["n_cases"] == 1

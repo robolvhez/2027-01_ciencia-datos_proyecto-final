@@ -1,9 +1,9 @@
 
 > [!WARNING]
-> **Nota para el entorno de MCPS en DNAnexus (Sin GUI):**
-> Este documento conserva la referencia oficial de *The Book of OHDSI* (Sección 6.3.1) sobre el funcionamiento conceptual de **Usagi** y la estructura de la tabla `SOURCE_TO_CONCEPT_MAP`.
-> Sin embargo, dado que los datos de **MCPS** son datos protegidos y todo el procesamiento se realiza dentro de un **servidor Linux remoto en DNAnexus sin interfaz gráfica (headless)**, no es posible ejecutar la GUI interactiva de Usagi directamente sobre los datos en el servidor.
-> Consulta [protocol.md](protocol.md#4-estrategia-de-mapeo-semántico-sin-gui-reemplazo-headless-de-usagi-en-dnanexus) para ver el flujo **headless / CLI** adoptado en este proyecto (cruces SQL directos con `CONCEPT_RELATIONSHIP` de Athena para CIE-10, tablas curadas `SOURCE_TO_CONCEPT_MAP` en CSV y similitud textual programática en Python con `rapidfuzz`).
+> **Note for the MCPS Environment on DNAnexus (Headless / No GUI):**
+> This document preserves the official reference from *The Book of OHDSI* (Section 6.3.1) on the conceptual operation of **Usagi** and the structure of the `SOURCE_TO_CONCEPT_MAP` table.
+> However, because **MCPS** data is protected under a Data Access Agreement and all production processing runs inside a **remote headless Linux server on DNAnexus without a graphical interface**, the interactive Usagi GUI cannot be executed directly on cohort data on the server.
+> See [protocol.md](protocol.md#4-headless-semantic-mapping-strategy-gui-free-usagi-replacement-on-dnanexus) for the **headless / CLI** workflow implemented in this project (direct Athena SQL crosswalks via `CONCEPT_RELATIONSHIP` for ICD-10, curated dual-code CSV mappings in `configs/source_to_concept_map.csv`, and programmatic CLI concept verification/matching via `./mcps-omop-etl verify-concepts` and `./mcps-omop-etl suggest-mappings`).
 
 ### 6.3.1 Usagi
 

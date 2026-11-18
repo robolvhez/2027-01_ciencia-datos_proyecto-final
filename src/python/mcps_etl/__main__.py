@@ -42,12 +42,21 @@ def build_parser() -> argparse.ArgumentParser:
     run_p.add_argument("--map-path", default=str(DEFAULT_MAP_PATH), help="Path to source_to_concept_map.csv")
     run_p.add_argument("--nrows", "-n", type=int, help="Optional row limit for quick validation runs")
 
-    coh_p = sub.add_parser("cohorts", help="Execute SQL cohort definitions (T2D, HTN, Obesity) and print summary counts")
+    coh_p = sub.add_parser(
+        "cohorts",
+        help="Execute all SQL cohort scripts in --cohorts-dir (default: src/sql/cohorts/*.sql) and print summary counts",
+    )
     coh_p.add_argument(
         "--db-url",
         "-d",
         default=DEFAULT_DB_URL,
         help=f"SQLite DB path or URL (default: {DEFAULT_DB_URL})",
+    )
+    coh_p.add_argument(
+        "--cohorts-dir",
+        "-c",
+        default=str(COHORTS_DIR),
+        help=f"Directory containing cohort *.sql scripts (default: {COHORTS_DIR})",
     )
 
     ver_p = sub.add_parser("verify-concepts", help="Verify mapped SNOMED/LOINC codes against an Athena CONCEPT table")
@@ -68,27 +77,41 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def run_cohorts_summary(db_url: str) -> list[dict[str, object]]:
-    """Execute cohort SQL definitions and return case counts per phenotype."""
+def run_cohorts_summary(
+    db_url: str,
+    cohorts_dir: str | Path = COHORTS_DIR,
+) -> list[dict[str, object]]:
+    """Execute all `*.sql` cohort definitions in `cohorts_dir` and return case counts per phenotype."""
     db_path = resolve_sqlite_path(db_url)
+    sql_files = sorted(Path(cohorts_dir).glob("*.sql"))
     with sqlite3.connect(db_path) as conn:
         conn.row_factory = sqlite3.Row
-        execute_sql_script(conn, COHORTS_DIR / "01_cohort_t2d.sql")
-        execute_sql_script(conn, COHORTS_DIR / "02_cohort_hypertension_obesity.sql")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS cohort_definition (
+                cohort_definition_id          INTEGER      PRIMARY KEY,
+                cohort_definition_name        VARCHAR(255) NOT NULL,
+                cohort_definition_description TEXT,
+                definition_type_concept_id    INTEGER      NOT NULL DEFAULT 32880,
+                cohort_definition_syntax      TEXT,
+                subject_concept_id            INTEGER      NOT NULL DEFAULT 1147314,
+                cohort_initiation_date        DATE
+            )
+            """
+        )
+        for sql_file in sql_files:
+            execute_sql_script(conn, sql_file)
         rows = conn.execute(
             """
             SELECT
                 c.cohort_definition_id,
-                CASE c.cohort_definition_id
-                    WHEN 1 THEN 'T2D (17_03_01)'
-                    WHEN 2 THEN 'Hypertension (17_02_01)'
-                    WHEN 3 THEN 'Obesity (BMI >= 30)'
-                END AS phenotype,
+                COALESCE(cd.cohort_definition_name, 'Cohort ' || c.cohort_definition_id) AS phenotype,
                 g.is_genotyped,
                 COUNT(*) AS n_cases
             FROM cohort c
             JOIN genomic_id_map g ON c.subject_id = g.person_id
-            GROUP BY c.cohort_definition_id, g.is_genotyped
+            LEFT JOIN cohort_definition cd ON c.cohort_definition_id = cd.cohort_definition_id
+            GROUP BY c.cohort_definition_id, cd.cohort_definition_name, g.is_genotyped
             ORDER BY c.cohort_definition_id, g.is_genotyped DESC
             """
         ).fetchall()
@@ -112,7 +135,7 @@ def main(argv: list[str] | None = None) -> None:
         )
         print(json.dumps({"status": "ok", "db_url": args.db_url, "loaded_rows": counts}, indent=2))
     elif args.command == "cohorts":
-        summary = run_cohorts_summary(args.db_url)
+        summary = run_cohorts_summary(args.db_url, cohorts_dir=args.cohorts_dir)
         print(json.dumps({"db_url": args.db_url, "cohort_counts": summary}, indent=2))
     elif args.command == "verify-concepts":
         athena_rows = read_mcps_table(args.athena_concept)

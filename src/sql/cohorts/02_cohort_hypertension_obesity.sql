@@ -4,6 +4,22 @@
 -- Cohort Definition 3: Obesity (BMI >= 30 kg/m2)
 --   Measurement: LOINC 39156-5 (OMOP 3038553: Body mass index >= 30.0 kg/m2)
 
+INSERT OR REPLACE INTO cohort_definition (
+    cohort_definition_id,
+    cohort_definition_name,
+    cohort_definition_description
+) VALUES
+(
+    2,
+    'Hypertension (17_02_01)',
+    'Hypertension: SNOMED 38341003 (OMOP 316866) or LOINC SBP >= 140 mmHg (OMOP 3004249) or DBP >= 90 mmHg (OMOP 3012888)'
+),
+(
+    3,
+    'Obesity (BMI >= 30)',
+    'Obesity: LOINC 39156-5 Body mass index >= 30.0 kg/m2 (OMOP 3038553)'
+);
+
 DELETE FROM cohort WHERE cohort_definition_id IN (2, 3);
 
 -- Populate Hypertension Cohort (cohort_definition_id = 2)

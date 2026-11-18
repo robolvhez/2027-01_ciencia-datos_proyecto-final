@@ -232,6 +232,16 @@ CREATE TABLE IF NOT EXISTS death (
     cause_source_concept_id INTEGER
 );
 
+CREATE TABLE IF NOT EXISTS cohort_definition (
+    cohort_definition_id          INTEGER      PRIMARY KEY,
+    cohort_definition_name        VARCHAR(255) NOT NULL,
+    cohort_definition_description TEXT,
+    definition_type_concept_id    INTEGER      NOT NULL DEFAULT 32880,
+    cohort_definition_syntax      TEXT,
+    subject_concept_id            INTEGER      NOT NULL DEFAULT 1147314,
+    cohort_initiation_date        DATE
+);
+
 CREATE TABLE IF NOT EXISTS cohort (
     cohort_definition_id INTEGER NOT NULL,
     subject_id           INTEGER NOT NULL REFERENCES person(person_id),
