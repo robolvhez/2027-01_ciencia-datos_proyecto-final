@@ -1,0 +1,21 @@
+services:
+  omop-db:
+    image: postgres:16-alpine
+    container_name: mcps-omop-db
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-omop}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-omop_secret}
+      POSTGRES_DB: ${POSTGRES_DB:-mcps_omop}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - omop_pgdata:/var/lib/postgresql/data
+      - ./src/sql/ddl:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-omop} -d ${POSTGRES_DB:-mcps_omop}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  omop_pgdata:

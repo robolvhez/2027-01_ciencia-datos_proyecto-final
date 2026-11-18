@@ -1,0 +1,8 @@
+#!/usr/bin/env python3
+# PYTHON_ARGCOMPLETE_OK
+"""Convenience CLI launcher for mcps-etl with argcomplete tab-completion support."""
+
+from src.python.mcps_etl.__main__ import main
+
+if __name__ == "__main__":
+    main()

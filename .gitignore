@@ -24,6 +24,7 @@ data/
 # Allow tracked documentation/config text files if needed
 !requirements*.txt
 !src/sql/**/*.sql
+!configs/*.csv
 
 # Logs
 log/*

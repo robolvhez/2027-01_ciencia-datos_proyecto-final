@@ -10,6 +10,7 @@ authors = [
 ]
 
 dependencies = [
+    "argcomplete>=3.0",
     "pandas>=2.2",
     "sqlalchemy>=2.0",
     "psycopg[binary]>=3.1",
@@ -29,7 +30,7 @@ dev = [
 ]
 
 [project.scripts]
-mcps-etl = "src.python.mcps_etl.__main__:main"
+mcps-omop-etl = "src.python.mcps_etl.__main__:main"
 
 [build-system]
 requires = ["setuptools>=75"]
