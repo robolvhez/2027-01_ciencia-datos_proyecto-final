@@ -1,4 +1,4 @@
-"""Database initialization and Stage 1 OMOP CDM v5.4 loader for MCPS (stdlib sqlite3 + csv)."""
+"""Database initialization and MCPS -> OMOP CDM v5.4 loader (stdlib sqlite3 + csv)."""
 
 from __future__ import annotations
 
@@ -9,9 +9,10 @@ from itertools import islice
 from pathlib import Path
 from typing import Any
 
-from .id_linkage import build_genomic_id_map, read_id_bridge
+from .id_linkage import build_genomic_id_map, read_id_bridge, read_plink_fam, validate_regid_linkage
 from .mapper import DEFAULT_MAP_PATH, load_concept_map
 from .transform import (
+    compute_drug_exposure,
     transform_conditions,
     transform_locations,
     transform_measurements,
@@ -90,10 +91,11 @@ def run_stage1_etl(
     input_data: str | Path | Iterable[Mapping[str, Any]],
     db_url: str | Path,
     id_bridge_path: str | Path | None = None,
+    fam_path: str | Path | None = None,
     map_path: str | Path = DEFAULT_MAP_PATH,
     nrows: int | None = None,
 ) -> dict[str, int]:
-    """Run the Stage 1 MCPS -> OMOP CDM v5.4 ETL pipeline and return loaded table row counts."""
+    """Run the MCPS -> OMOP CDM v5.4 ETL pipeline and return loaded table row counts."""
     db_path = resolve_sqlite_path(db_url)
     raw_rows = (
         read_mcps_table(input_data, nrows=nrows)
@@ -104,15 +106,19 @@ def run_stage1_etl(
         row["person_id"] = idx
 
     id_bridge = read_id_bridge(id_bridge_path) if id_bridge_path else None
+    fam_samples = read_plink_fam(fam_path) if fam_path else None
     concept_map = load_concept_map(map_path)
 
-    genomic_map_rows = build_genomic_id_map(raw_rows, id_bridge=id_bridge)
+    genomic_map_rows = build_genomic_id_map(raw_rows, id_bridge=id_bridge, fam_samples=fam_samples)
+    validate_regid_linkage(genomic_map_rows)
+
     locations_rows = transform_locations()
     persons_rows = transform_persons(raw_rows, genomic_map_rows)
     visits_rows, periods_rows = transform_visits_and_periods(raw_rows)
     measurements_rows = transform_measurements(raw_rows, concept_map=concept_map)
     conditions_rows = transform_conditions(raw_rows, concept_map=concept_map)
     observations_rows = transform_observations(raw_rows, concept_map=concept_map)
+    drug_exposures_rows = compute_drug_exposure(raw_rows, concept_map=concept_map)
 
     tables_to_load: list[tuple[str, list[dict[str, Any]]]] = [
         ("location", locations_rows),
@@ -123,6 +129,7 @@ def run_stage1_etl(
         ("measurement", measurements_rows),
         ("condition_occurrence", conditions_rows),
         ("observation", observations_rows),
+        ("drug_exposure", drug_exposures_rows),
     ]
 
     with sqlite3.connect(db_path) as conn:

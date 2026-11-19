@@ -16,7 +16,14 @@ except ImportError:  # pragma: no cover
     argcomplete = None  # type: ignore[assignment]
 
 from .load import execute_sql_script, read_mcps_table, resolve_sqlite_path, run_stage1_etl
-from .mapper import DEFAULT_MAP_PATH, suggest_mappings, verify_concepts_against_athena
+from .mapper import (
+    DEFAULT_MAP_PATH,
+    MIN_MEDICATION_MENTION_COUNT,
+    load_concept_map,
+    profile_medication_terms,
+    suggest_mappings,
+    verify_concepts_against_athena,
+)
 
 COHORTS_DIR = Path(__file__).resolve().parents[2] / "sql" / "cohorts"
 DEFAULT_DB_URL = "sqlite:////tmp/mcps_omop.db"
@@ -30,7 +37,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    run_p = sub.add_parser("run", help="Run Stage 1 MCPS -> OMOP CDM v5.4 database build")
+    run_p = sub.add_parser("run", help="Run MCPS -> OMOP CDM v5.4 database build")
     run_p.add_argument("--input", "-i", required=True, help="Path to MCPS baseline CSV or genotyped TSV/TXT")
     run_p.add_argument(
         "--db-url",
@@ -38,7 +45,8 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_DB_URL,
         help=f"SQLite DB path or URL (default: {DEFAULT_DB_URL})",
     )
-    run_p.add_argument("--id-bridge", help="Optional PATID <-> Regeneron IID/FID crosswalk file")
+    run_p.add_argument("--id-bridge", help="Optional PATID <-> Regeneron RegID (IID/FID) crosswalk file")
+    run_p.add_argument("--fam", "-f", help="Optional PLINK .fam file listing genotyped sample FID/IIDs")
     run_p.add_argument("--map-path", default=str(DEFAULT_MAP_PATH), help="Path to source_to_concept_map.csv")
     run_p.add_argument("--nrows", "-n", type=int, help="Optional row limit for quick validation runs")
 
@@ -59,7 +67,21 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"Directory containing cohort *.sql scripts (default: {COHORTS_DIR})",
     )
 
-    ver_p = sub.add_parser("verify-concepts", help="Verify mapped SNOMED/LOINC codes against an Athena CONCEPT table")
+    prof_p = sub.add_parser(
+        "profile-medications",
+        help="Traceably count MEDICATION1..3 strings, enforce --min-count threshold, and audit mapping coverage",
+    )
+    prof_p.add_argument("--input", "-i", required=True, help="Path to MCPS baseline CSV")
+    prof_p.add_argument(
+        "--min-count",
+        type=int,
+        default=MIN_MEDICATION_MENTION_COUNT,
+        help=f"Minimum mention count threshold (default: {MIN_MEDICATION_MENTION_COUNT})",
+    )
+    prof_p.add_argument("--map-path", default=str(DEFAULT_MAP_PATH), help="Path to source_to_concept_map.csv")
+    prof_p.add_argument("--nrows", "-n", type=int, help="Optional row limit")
+
+    ver_p = sub.add_parser("verify-concepts", help="Verify mapped SNOMED/LOINC/RxNorm/ATC codes against Athena CONCEPT.csv")
     ver_p.add_argument("--athena-concept", required=True, help="Path to Athena CONCEPT.csv")
     ver_p.add_argument("--map-path", default=str(DEFAULT_MAP_PATH), help="Path to source_to_concept_map.csv")
 
@@ -130,6 +152,7 @@ def main(argv: list[str] | None = None) -> None:
             input_data=args.input,
             db_url=args.db_url,
             id_bridge_path=args.id_bridge,
+            fam_path=args.fam,
             map_path=args.map_path,
             nrows=args.nrows,
         )
@@ -137,9 +160,13 @@ def main(argv: list[str] | None = None) -> None:
     elif args.command == "cohorts":
         summary = run_cohorts_summary(args.db_url, cohorts_dir=args.cohorts_dir)
         print(json.dumps({"db_url": args.db_url, "cohort_counts": summary}, indent=2))
+    elif args.command == "profile-medications":
+        raw_rows = read_mcps_table(args.input, nrows=args.nrows)
+        cmap = load_concept_map(args.map_path)
+        profile = profile_medication_terms(raw_rows, concept_map=cmap, min_count=args.min_count)
+        print(json.dumps(profile, indent=2))
     elif args.command == "verify-concepts":
-        athena_rows = read_mcps_table(args.athena_concept)
-        report = verify_concepts_against_athena(athena_rows, map_path=args.map_path)
+        report = verify_concepts_against_athena(args.athena_concept, map_path=args.map_path)
         print(json.dumps(report, indent=2))
     elif args.command == "suggest-mappings":
         terms_rows = read_mcps_table(args.terms)

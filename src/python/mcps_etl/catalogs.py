@@ -134,6 +134,20 @@ DUR_PHYS_LABELS: dict[int, str] = {
     3: "more than 60 minutes",
 }
 
+# Field 56: Women only - Most frequently used contraceptive
+CONTRACEPTIVE_LABELS: dict[int, str] = {
+    1: "The Pill",
+    2: "Syringe hormonal",
+    3: "Other",
+    4: "None",
+}
+
+# Genotyping status observation labels (SNOMED 708060009 / OMOP 45769413: Genotype determination)
+IS_GENOTYPED_LABELS: dict[int, str] = {
+    0: "Not genotyped",
+    1: "Genotyped",
+}
+
 CATEGORY_CATALOGS: dict[str, dict[int, str]] = {
     "MARITAL_STATUS": MARITAL_STATUS_LABELS,
     "EDUGP": EDUGP_LABELS,
@@ -145,6 +159,8 @@ CATEGORY_CATALOGS: dict[str, dict[int, str]] = {
     "TYPE_ALC": TYPE_ALC_LABELS,
     "FREQ_PHYS": FREQ_PHYS_LABELS,
     "DUR_PHYS": DUR_PHYS_LABELS,
+    "CONTRACEPTIVE": CONTRACEPTIVE_LABELS,
+    "IS_GENOTYPED": IS_GENOTYPED_LABELS,
 }
 
 # Stage 1 Cardiometabolic Baseline Condition Variables -> Diagnosis Decade Column
@@ -176,7 +192,7 @@ STAGE1_RAW_MEASUREMENTS: tuple[str, ...] = (
     "BASE_HBA1C_IFCC",
 )
 
-# Stage 1 Core Covariate Observation Columns
+# Stage 1 Core Covariate & Genotyping Observation Columns
 STAGE1_OBSERVATIONS: tuple[str, ...] = (
     "MARITAL_STATUS",
     "EDUGP",
@@ -197,4 +213,55 @@ STAGE1_OBSERVATIONS: tuple[str, ...] = (
     "DUR_PHYS",
     "BLOOD",
     "FASTING_DURATION",
+    "HRT_USE",
+    "CONTRACEPTIVE",
+    "IS_GENOTYPED",
+)
+
+# Clinician-derived binary baseline medication classes (37 variables: 1=yes, 0=no for regular use > 1 month)
+STAGE1_DRUG_CLASSES: tuple[str, ...] = (
+    "DRUG_A1",
+    "DRUG_A2",
+    "DRUG_A3",
+    "DRUG_A4",
+    "DRUG_A5",
+    "DRUG_A6",
+    "DRUG_A7",
+    "DRUG_A8",
+    "DRUG_A9",
+    "DRUG_A10",
+    "DRUG_A11",
+    "DRUG_B1",
+    "DRUG_B2",
+    "DRUG_B3",
+    "DRUG_B4",
+    "DRUG_C1",
+    "DRUG_C2",
+    "DRUG_C3",
+    "DRUG_C4",
+    "DRUG_D1",
+    "DRUG_D2",
+    "DRUG_D3",
+    "DRUG_D4",
+    "DRUG_E1",
+    "DRUG_E2",
+    "DRUG_E3",
+    "DRUG_E4",
+    "DRUG_E5",
+    "DRUG_G1",
+    "DRUG_H1",
+    "DRUG_H2",
+    "DRUG_H3",
+    "DRUG_K1",
+    "DRUG_K2",
+    "DRUG_K3",
+    "DRUG_K4",
+    "DRUG_K5",
+)
+
+# Verbatim self-reported medication text columns at baseline (Field 49: taken regularly for > 1 month)
+STAGE1_MEDICATION_TEXT_COLS: tuple[str, ...] = (
+    "MEDICATION1",
+    "MEDICATION2",
+    "MEDICATION3",
 )

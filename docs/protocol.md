@@ -288,4 +288,19 @@ To ensure the pipeline runs seamlessly inside headless **DNAnexus** workers (wit
 3. **Phase 3 — Stage 1 ETL Engine (`src/python/mcps_etl/`):**
    - Zero-external-dependency (`stdlib`) transformations into `location`, `person`, `genomic_id_map`, `visit_occurrence`, `observation_period`, `measurement` (including derived BMI, waist-to-hip ratio, and mean blood pressure), `condition_occurrence` (with diagnosis decade imputation from `BASE_*_DX`), and `observation` (April 2025 updated socioeconomic and lifestyle catalogs).
 4. **Phase 4 — SQL Cohorts & Unit Testing (`src/sql/cohorts/` & `tests/test_mcps_etl.py`):**
-   - Reproducible SQL queries for Type 2 Diabetes (`cohort_definition_id = 1`), Hypertension (`cohort_definition_id = 2`), and Obesity (`cohort_definition_id = 3`) stratified by genotyping status (`is_genotyped`), validated by an in-memory `pytest` suite containing zero protected data.
+   - Reproducible SQL queries for Type 2 Diabetes (`cohort_definition_id = 2` / `17_03_01`), Broad Diabetes (`1` / `17_01_01`), Hypertension (`3` / `17_02_01`), Pharmacotherapy Cohorts (`4..9` / `09_01_01..09_06_01`), and Obesity (`10` / `BMI >= 30`), stratified by genotyping status (`is_genotyped`), validated by an in-memory `pytest` suite containing zero protected data.
+
+---
+
+## 7. Completed Implementation Phases (Stage 2: Drugs, Medications & Strict `.fam` Genotyping Linkage)
+
+1. **Athena Bundle Verification & Stage 1 Audit Fix (`configs/source_to_concept_map.csv` & `src/sql/ddl/02_seed_concepts.sql`):**
+   - Verified all 153 mapping rows (133 unique concepts across `SNOMED`, `LOINC`, `RxNorm`, `ATC`, `UCUM`, `Gender`, `Ethnicity`, `Visit`, and `Type Concept`) against the downloaded official OHDSI Athena `CONCEPT.csv` (`0` mismatches, `0` invalid concepts).
+2. **Strict `PATID` $\leftrightarrow$ `RegID` Linkage & Standard Genotyping Observation (`src/python/mcps_etl/id_linkage.py`):**
+   - Added `read_plink_fam()` (`--fam` / `-f`) and `validate_regid_linkage()` enforcing strict uniqueness (`0` duplicate `RegID`s or `PATID`s, never computing/synthesizing `RegID`s from `PATID`, and benchmarking against `EXPECTED_GENOTYPED_INDIVIDUALS = 140_831`).
+   - Populates both `genomic_id_map.is_genotyped` and the standard OMOP `observation` row (`IS_GENOTYPED` $\rightarrow$ `45769413`, SNOMED `708060009` *"Genotype determination"*).
+3. **Raw Drug & Medication ETL (`compute_drug_exposure()` & `profile-medications`):**
+   - `compute_drug_exposure()` in `src/python/mcps_etl/transform.py` transforms all 37 raw `DRUG_A1..DRUG_K5` clinician-coded drug classes (`ATC` / `RxNorm`) and all 61 qualifying ($\ge 250$ mentions) Spanish `MEDICATION1..3` strings (`RxNorm` / `ATC`) into OMOP `drug_exposure` (`days_supply = 30`), plus `HRT_USE` and `CONTRACEPTIVE` into `observation`.
+   - `./mcps-omop-etl profile-medications` deterministically counts `MEDICATION1..3` strings, enforces `MIN_MEDICATION_MENTION_COUNT = 250`, and audits mapping coverage (`88,014 / 117,371` mentions = `74.99%`, `0` unmapped terms above threshold).
+4. **Clinician-Documented Single-Code SQL Cohorts (`src/sql/cohorts/01..10_*.sql`):**
+   - One dedicated, clinician-documented SQL file per GWAS Phenotype Catalogue code (`17_01_01`, `17_03_01`, `17_02_01`, `09_01_01..09_06_01`, and `BMI >= 30`), integrating `drug_exposure` into Diabetes (`17_01_01` / `17_03_01`) and Hypertension (`17_02_01`).

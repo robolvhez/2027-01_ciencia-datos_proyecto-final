@@ -1,15 +1,19 @@
-"""Headless SNOMED CT / LOINC concept mapping and Athena verification (Usagi CLI replacement)."""
+"""Headless SNOMED CT / LOINC / RxNorm / ATC concept mapping, Athena verification, and medication profiler."""
 
 from __future__ import annotations
 
 import csv
+from collections import Counter
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
 
+from .catalogs import STAGE1_MEDICATION_TEXT_COLS
+
 DEFAULT_MAP_PATH = Path(__file__).resolve().parents[3] / "configs" / "source_to_concept_map.csv"
+MIN_MEDICATION_MENTION_COUNT: int = 250
 
 
 @dataclass(frozen=True)
@@ -66,26 +70,56 @@ def load_concept_map(path: str | Path = DEFAULT_MAP_PATH) -> dict[str, ConceptMa
     return entries
 
 
+def _stream_athena_concepts_from_path(
+    concept_path: str | Path,
+    needed_keys: set[tuple[str, str]],
+) -> dict[tuple[str, str], dict[str, Any]]:
+    """Stream an exported Athena `CONCEPT.csv` file in constant memory, indexing only needed (vocab, code) keys."""
+    file_path = Path(concept_path)
+    with file_path.open("r", encoding="utf-8", newline="") as handle:
+        first_line = handle.readline()
+        sep = "\t" if "\t" in first_line else ","
+        handle.seek(0)
+        reader = csv.DictReader(handle, delimiter=sep)
+        by_vocab_code: dict[tuple[str, str], dict[str, Any]] = {}
+        for row in reader:
+            key = (str(row.get("vocabulary_id") or "").strip(), str(row.get("concept_code") or "").strip())
+            if key in needed_keys:
+                by_vocab_code[key] = row
+    return by_vocab_code
+
+
 def verify_concepts_against_athena(
-    athena_concepts: Iterable[Mapping[str, Any]],
+    athena_concepts: str | Path | Iterable[Mapping[str, Any]],
     map_path: str | Path = DEFAULT_MAP_PATH,
 ) -> list[dict[str, Any]]:
-    """Verify mapped `(target_vocabulary_id, target_concept_code)` against an Athena CONCEPT table.
+    """Verify mapped `(target_vocabulary_id, target_concept_code)` against an Athena CONCEPT table or file.
 
-    Checks that each native SNOMED CT / LOINC code resolves to the expected OMOP `concept_id`
-    and is marked as an active Standard Concept (`standard_concept == 'S'`).
+    Checks that each native SNOMED CT / LOINC / RxNorm / ATC code resolves to the expected OMOP `concept_id`
+    and is marked as an active Standard Concept (`standard_concept == 'S'`, or `'C'`/'S' for ATC drug classes).
     """
-    by_vocab_code: dict[tuple[str, str], Mapping[str, Any]] = {}
-    for c in athena_concepts:
-        key = (str(c["vocabulary_id"]).strip(), str(c["concept_code"]).strip())
-        by_vocab_code[key] = c
+    cmap = load_concept_map(map_path)
+    needed_keys = {(e.target_vocabulary_id, e.target_concept_code) for e in cmap.values()}
+
+    if isinstance(athena_concepts, (str, Path)):
+        by_vocab_code: dict[tuple[str, str], Mapping[str, Any]] = _stream_athena_concepts_from_path(
+            athena_concepts,
+            needed_keys=needed_keys,
+        )
+    else:
+        by_vocab_code = {}
+        for c in athena_concepts:
+            key = (str(c["vocabulary_id"]).strip(), str(c["concept_code"]).strip())
+            by_vocab_code[key] = c
 
     results: list[dict[str, Any]] = []
-    for entry in load_concept_map(map_path).values():
+    for entry in cmap.values():
         hit = by_vocab_code.get((entry.target_vocabulary_id, entry.target_concept_code))
         hit_id = int(hit["concept_id"]) if hit and hit.get("concept_id") is not None else None
-        inv_reason = hit.get("invalid_reason") if hit else "MISSING"
-        is_std = bool(hit and str(hit.get("standard_concept")) == "S" and not inv_reason)
+        inv_reason = (str(hit.get("invalid_reason") or "").strip()) if hit else "MISSING"
+        std_val = str(hit.get("standard_concept") or "").strip() if hit else ""
+        allowed_std = {"S", "C"} if entry.target_vocabulary_id == "ATC" else {"S"}
+        is_std = bool(hit and std_val in allowed_std and not inv_reason)
         results.append(
             {
                 "source_code": entry.source_code,
@@ -100,6 +134,60 @@ def verify_concepts_against_athena(
             }
         )
     return results
+
+
+def profile_medication_terms(
+    rows: Iterable[Mapping[str, Any]],
+    concept_map: dict[str, ConceptMapEntry] | None = None,
+    min_count: int = MIN_MEDICATION_MENTION_COUNT,
+) -> dict[str, Any]:
+    """Deterministically count verbatim `MEDICATION1..3` strings, enforce `min_count`, and audit mapping coverage."""
+    cmap = concept_map or load_concept_map()
+    counter: Counter[str] = Counter()
+
+    for row in rows:
+        for col in STAGE1_MEDICATION_TEXT_COLS:
+            raw_val = row.get(col)
+            if raw_val is None:
+                continue
+            norm = " ".join(str(raw_val).strip().upper().split())
+            if norm and norm not in {"NA", "NAN", "NONE"}:
+                counter[norm] += 1
+
+    total_mentions = sum(counter.values())
+    mapped_mentions = sum(cnt for term, cnt in counter.items() if term in cmap)
+    coverage_pct = round((100.0 * mapped_mentions / total_mentions), 2) if total_mentions > 0 else 0.0
+
+    qualifying_terms: list[dict[str, Any]] = []
+    unmapped_above_threshold: list[str] = []
+    for term, cnt in counter.most_common():
+        if cnt < min_count:
+            continue
+        entry = cmap.get(term)
+        is_mapped = entry is not None
+        if not is_mapped:
+            unmapped_above_threshold.append(term)
+        qualifying_terms.append(
+            {
+                "source_code": term,
+                "mention_count": cnt,
+                "is_mapped": is_mapped,
+                "target_concept_id": entry.target_concept_id if entry else None,
+                "target_vocabulary_id": entry.target_vocabulary_id if entry else None,
+                "target_concept_code": entry.target_concept_code if entry else None,
+            }
+        )
+
+    return {
+        "min_count_threshold": min_count,
+        "distinct_terms_total": len(counter),
+        "distinct_terms_above_threshold": len(qualifying_terms),
+        "unmapped_terms_above_threshold": unmapped_above_threshold,
+        "total_mentions": total_mentions,
+        "mapped_mentions": mapped_mentions,
+        "coverage_pct": coverage_pct,
+        "qualifying_terms": qualifying_terms,
+    }
 
 
 def _similarity(a: str, b: str) -> float:

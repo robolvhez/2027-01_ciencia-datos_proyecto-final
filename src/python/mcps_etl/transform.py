@@ -1,4 +1,4 @@
-"""Stage 1 transformations from MCPS Baseline & Genotyped records to OMOP CDM v5.4 rows."""
+"""Stage 1 & Stage 2 transformations from MCPS Baseline & Genotyped records to OMOP CDM v5.4 rows."""
 
 from __future__ import annotations
 
@@ -9,6 +9,8 @@ from .catalogs import (
     CATEGORY_CATALOGS,
     DECADE_DX_TO_DATE,
     STAGE1_CONDITIONS,
+    STAGE1_DRUG_CLASSES,
+    STAGE1_MEDICATION_TEXT_COLS,
     STAGE1_OBSERVATIONS,
     STAGE1_RAW_MEASUREMENTS,
 )
@@ -21,12 +23,6 @@ GWAS_CATALOG_MEASUREMENTS: tuple[str, ...] = (
     "11_07_01",
     "11_11_01",
     "13_01_01",
-    "15_01_01",
-    "15_04_01",
-    "15_04_02",
-    "15_10_01",
-    "15_16_18",
-    "15_17_17",
 )
 
 GWAS_CATALOG_CONDITIONS: tuple[str, ...] = (
@@ -39,6 +35,15 @@ GWAS_CATALOG_CONDITIONS: tuple[str, ...] = (
 def _clean_int(val: Any) -> int | None:
     f = _clean_float(val)
     return int(f) if f is not None else None
+
+
+def normalize_medication_text(val: Any) -> str | None:
+    """Clean and normalize a verbatim Spanish `MEDICATION1..3` string (uppercase, single-spaced)."""
+    s = _clean_str(val)
+    if s is None:
+        return None
+    norm = " ".join(s.upper().split())
+    return norm if norm else None
 
 
 def visit_date_for_row(row: Mapping[str, Any]) -> str:
@@ -87,7 +92,7 @@ def transform_persons(
     rows: Iterable[Mapping[str, Any]],
     genomic_id_map: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Transform MCPS participants into OMOP `person` rows, prioritizing genotype_iid as source value."""
+    """Transform MCPS participants into OMOP `person` rows, prioritizing verified RegID (`genotype_iid`)."""
     persons: list[dict[str, Any]] = []
     for row, gmap in zip(rows, genomic_id_map, strict=True):
         person_id = int(gmap["person_id"])
@@ -322,7 +327,7 @@ def transform_observations(
     concept_map: dict[str, ConceptMapEntry] | None = None,
     start_id: int = 1,
 ) -> list[dict[str, Any]]:
-    """Transform Stage 1 socioeconomic and lifestyle covariates into OMOP `observation` rows."""
+    """Transform socioeconomic, lifestyle, hormonal, and genotyping covariates into OMOP `observation` rows."""
     cmap = concept_map or load_concept_map()
     observations: list[dict[str, Any]] = []
     obs_id = start_id
@@ -345,7 +350,7 @@ def transform_observations(
                     "observation_concept_id": entry.target_concept_id,
                     "observation_date": vdate,
                     "observation_datetime": None,
-                    "observation_type_concept_id": 32865,
+                    "observation_type_concept_id": 32880 if obs_col == "IS_GENOTYPED" else 32865,
                     "value_as_number": num_val,
                     "value_as_string": str_val,
                     "value_as_concept_id": 0,
@@ -366,3 +371,96 @@ def transform_observations(
             obs_id += 1
 
     return observations
+
+
+def compute_drug_exposure(
+    rows: Iterable[Mapping[str, Any]],
+    concept_map: dict[str, ConceptMapEntry] | None = None,
+    start_id: int = 1,
+    include_unmapped_text: bool = False,
+) -> list[dict[str, Any]]:
+    """Compute OMOP `drug_exposure` rows from raw MCPS `DRUG_A1..K5` flags and `MEDICATION1..3` strings.
+
+    Participants reported medicines taken regularly for more than a month (`days_supply = 30`).
+    """
+    cmap = concept_map or load_concept_map()
+    exposures: list[dict[str, Any]] = []
+    drug_id = start_id
+
+    for idx, row in enumerate(rows, start=1):
+        person_id = int(row.get("person_id") or idx)
+        vdate = visit_date_for_row(row)
+
+        for drug_col in STAGE1_DRUG_CLASSES:
+            if _clean_int(row.get(drug_col)) == 1 and drug_col in cmap:
+                entry = cmap[drug_col]
+                exposures.append(
+                    {
+                        "drug_exposure_id": drug_id,
+                        "person_id": person_id,
+                        "drug_concept_id": entry.target_concept_id,
+                        "drug_exposure_start_date": vdate,
+                        "drug_exposure_start_datetime": None,
+                        "drug_exposure_end_date": vdate,
+                        "drug_exposure_end_datetime": None,
+                        "verbatim_end_date": None,
+                        "drug_type_concept_id": 32865,
+                        "stop_reason": None,
+                        "refills": None,
+                        "quantity": None,
+                        "days_supply": 30,
+                        "sig": "Regular use > 1 month (MCPS clinician-coded class)",
+                        "route_concept_id": 0,
+                        "lot_number": None,
+                        "provider_id": None,
+                        "visit_occurrence_id": person_id,
+                        "visit_detail_id": None,
+                        "drug_source_value": drug_col,
+                        "drug_source_concept_id": 0,
+                        "route_source_value": None,
+                        "dose_unit_source_value": None,
+                    }
+                )
+                drug_id += 1
+
+        for med_col in STAGE1_MEDICATION_TEXT_COLS:
+            norm_text = normalize_medication_text(row.get(med_col))
+            if not norm_text:
+                continue
+            if norm_text in cmap:
+                target_cid = cmap[norm_text].target_concept_id
+            elif include_unmapped_text:
+                target_cid = 0
+            else:
+                continue
+
+            exposures.append(
+                {
+                    "drug_exposure_id": drug_id,
+                    "person_id": person_id,
+                    "drug_concept_id": target_cid,
+                    "drug_exposure_start_date": vdate,
+                    "drug_exposure_start_datetime": None,
+                    "drug_exposure_end_date": vdate,
+                    "drug_exposure_end_datetime": None,
+                    "verbatim_end_date": None,
+                    "drug_type_concept_id": 32865,
+                    "stop_reason": None,
+                    "refills": None,
+                    "quantity": None,
+                    "days_supply": 30,
+                    "sig": f"{med_col}: Regular use > 1 month",
+                    "route_concept_id": 0,
+                    "lot_number": None,
+                    "provider_id": None,
+                    "visit_occurrence_id": person_id,
+                    "visit_detail_id": None,
+                    "drug_source_value": norm_text,
+                    "drug_source_concept_id": 0,
+                    "route_source_value": None,
+                    "dose_unit_source_value": None,
+                }
+            )
+            drug_id += 1
+
+    return exposures
