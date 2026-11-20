@@ -20,3 +20,8 @@
 
 ## 4. CLI Ergonomics
 - Maintain `# PYTHON_ARGCOMPLETE_OK` and `argcomplete.autocomplete(parser)` on `./mcps-omop-etl` and `src/python/mcps_etl/__main__.py`, with short flags (`-i`, `-d`, `-n`) and sensible defaults (`-d sqlite:////tmp/mcps_omop.db`).
+
+## 5. Future GUI Cohort Builder & Expansion Guardrails
+- **Dual GUI Compatibility (OHDSI ATLAS vs. Lightweight DNAnexus Web UI):** Keep core OMOP CDM v5.4 DDL compatible with both SQLite and PostgreSQL so the database can either (a) migrate to PostgreSQL + OHDSI **Broadsea/ATLAS** (CIRCE JSON, `concept_ancestor`, Achilles) for binary OHDSI network cohorts, or (b) power a lightweight Python web GUI (**Streamlit** / **FastAPI**) running directly on SQLite inside a DNAnexus workstation for both visual cohort building (with attrition tables) and wide GWAS phenotype extraction (`1`/`0`/`NA` binary + raw continuous traits).
+- **Decoupled Backend Logic:** Keep cohort, phenotype, and export functions in `src/python/mcps_etl/` as pure Python APIs returning structured dicts (no CLI `print()` coupling) so both `./mcps-omop-etl` and any future web GUI call the exact same tested backend.
+- **Raw Continuous Traits in DB (Downstream RINT):** Store QC-cleaned raw continuous traits in the database; leave Rank-Based Inverse Normal Transformation (RINT) to downstream GWAS workflows (`REGENIE`, `snipar`) after `.keep` subcohort subsetting.

@@ -8,7 +8,7 @@ from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any
 
-RGC_IID_PATTERN = re.compile(r"(?:MCPS_)?(MCPSRGN\d+)_(MEXB\d+)")
+RGC_IID_PATTERN = re.compile(r"(?:MCPS_)?(MCPSRGN\d+)_(MEXB\d+(?:-DUP)?)")
 EXPECTED_GENOTYPED_INDIVIDUALS: int = 140_831
 
 
@@ -30,6 +30,7 @@ def read_id_bridge(path: str | Path) -> dict[str, tuple[str, str]]:
     file_path = Path(path)
     sep = "\t" if file_path.suffix.lower() in {".txt", ".tsv"} else ","
     bridge: dict[str, tuple[str, str]] = {}
+    seen_patids: set[str] = set()
     seen_iids: dict[str, str] = {}
     with file_path.open("r", encoding="utf-8", newline="") as handle:
         reader = csv.DictReader(handle, delimiter=sep)
@@ -37,10 +38,13 @@ def read_id_bridge(path: str | Path) -> dict[str, tuple[str, str]]:
             patid = (row.get("PATID") or "").strip()
             iid = (row.get("IID") or "").strip()
             fid = (row.get("FID") or iid).strip()
-            if not patid or not iid:
+            if not patid:
                 continue
-            if patid in bridge and bridge[patid][0] != iid:
-                raise ValueError(f"Duplicate PATID in ID bridge mapped to multiple RegIDs: {patid}")
+            if patid in seen_patids:
+                raise ValueError(f"Duplicate PATID in ID bridge: {patid}")
+            seen_patids.add(patid)
+            if not iid:
+                continue
             if iid in seen_iids and seen_iids[iid] != patid:
                 raise ValueError(f"Duplicate RegID (IID) in ID bridge mapped to multiple PATIDs: {iid}")
             bridge[patid] = (iid, fid)

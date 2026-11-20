@@ -249,3 +249,22 @@ CREATE TABLE IF NOT EXISTS cohort (
     cohort_end_date      DATE    NOT NULL,
     PRIMARY KEY (cohort_definition_id, subject_id, cohort_start_date)
 );
+
+-- Standardized Phenotype Mart Registry (supports binary 1/0/NULL, raw continuous, and categorical GWAS traits)
+CREATE TABLE IF NOT EXISTS phenotype_definition (
+    phenotype_code  VARCHAR(64)  PRIMARY KEY,
+    phenotype_name  VARCHAR(255) NOT NULL,
+    variable_type   VARCHAR(20)  NOT NULL CHECK (variable_type IN ('binary', 'continuous', 'categorical')),
+    units           VARCHAR(50),
+    description     TEXT,
+    sql_source_path VARCHAR(255),
+    sql_query       TEXT         NOT NULL,
+    updated_at      TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS phenotype_value (
+    phenotype_code VARCHAR(64) NOT NULL REFERENCES phenotype_definition(phenotype_code) ON DELETE CASCADE,
+    person_id      INTEGER     NOT NULL REFERENCES person(person_id),
+    value_numeric  REAL,
+    PRIMARY KEY (phenotype_code, person_id)
+);

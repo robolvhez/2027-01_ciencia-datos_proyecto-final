@@ -1,5 +1,6 @@
 -- Seed Standard OMOP Concepts (SNOMED CT, LOINC, RxNorm, ATC, UCUM, Gender, Ethnicity, Visit, Type)
 -- 100% Verified against official OHDSI Athena vocabulary definitions
+-- Mapping found in configs/source_to_concept_map.csv
 
 INSERT INTO vocabulary (vocabulary_id, vocabulary_name, vocabulary_reference, vocabulary_version, vocabulary_concept_id) VALUES
 ('SNOMED', 'Systematic Nomenclature of Medicine - Clinical Terms', 'http://www.snomed.org/', '2025-01', 44819097),

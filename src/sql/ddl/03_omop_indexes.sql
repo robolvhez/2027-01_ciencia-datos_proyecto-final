@@ -17,3 +17,4 @@ CREATE INDEX IF NOT EXISTS idx_visit_person ON visit_occurrence (person_id);
 CREATE INDEX IF NOT EXISTS idx_obs_period_person ON observation_period (person_id);
 CREATE INDEX IF NOT EXISTS idx_genomic_is_genotyped ON genomic_id_map (is_genotyped, person_id);
 CREATE INDEX IF NOT EXISTS idx_cohort_subject ON cohort (subject_id);
+CREATE INDEX IF NOT EXISTS idx_pheno_val_person ON phenotype_value (person_id, phenotype_code);

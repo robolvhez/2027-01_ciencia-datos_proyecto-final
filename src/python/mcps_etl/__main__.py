@@ -15,7 +15,8 @@ try:
 except ImportError:  # pragma: no cover
     argcomplete = None  # type: ignore[assignment]
 
-from .load import execute_sql_script, read_mcps_table, resolve_sqlite_path, run_stage1_etl
+from .build_bridge import DEFAULT_BRIDGE_OUT, DEFAULT_IID_PATID_PATTERN, generate_bridge_file
+from .load import construct_db, execute_sql_script, read_mcps_table, resolve_sqlite_path
 from .mapper import (
     DEFAULT_MAP_PATH,
     MIN_MEDICATION_MENTION_COUNT,
@@ -23,6 +24,14 @@ from .mapper import (
     profile_medication_terms,
     suggest_mappings,
     verify_concepts_against_athena,
+)
+from .phenotypes import (
+    PHENOTYPES_DIR,
+    add_phenotype_column,
+    add_phenotype_directory,
+    export_gwas_phenotypes,
+    list_phenotypes,
+    remove_phenotype_column,
 )
 
 COHORTS_DIR = Path(__file__).resolve().parents[2] / "sql" / "cohorts"
@@ -50,6 +59,24 @@ def build_parser() -> argparse.ArgumentParser:
     run_p.add_argument("--map-path", default=str(DEFAULT_MAP_PATH), help="Path to source_to_concept_map.csv")
     run_p.add_argument("--nrows", "-n", type=int, help="Optional row limit for quick validation runs")
 
+    bridge_p = sub.add_parser(
+        "build-bridge",
+        help="Build a verified 1:1 PATID <-> genotype IID/FID bridge file for --id-bridge",
+    )
+    bridge_p.add_argument("--input", "-i", required=True, help="Path to MCPS baseline CSV/TSV containing PATID")
+    bridge_p.add_argument("--fam", "-f", required=True, help="Path to PLINK .fam file listing genotyped FID/IIDs")
+    bridge_p.add_argument(
+        "--out",
+        "-o",
+        default=DEFAULT_BRIDGE_OUT,
+        help=f"Output bridge path (.tsv, .txt, or .csv; default: {DEFAULT_BRIDGE_OUT})",
+    )
+    bridge_p.add_argument(
+        "--pattern",
+        default=DEFAULT_IID_PATID_PATTERN.pattern,
+        help="Regex whose capture group 1 extracts PATID from .fam IID",
+    )
+
     coh_p = sub.add_parser(
         "cohorts",
         help="Execute all SQL cohort scripts in --cohorts-dir (default: src/sql/cohorts/*.sql) and print summary counts",
@@ -66,6 +93,77 @@ def build_parser() -> argparse.ArgumentParser:
         default=str(COHORTS_DIR),
         help=f"Directory containing cohort *.sql scripts (default: {COHORTS_DIR})",
     )
+
+    pheno_p = sub.add_parser(
+        "phenotype",
+        help="Manage the wide GWAS phenotype mart (`gwas_phenotypes`): add/remove/list/export SQL-defined columns",
+    )
+    pheno_sub = pheno_p.add_subparsers(dest="phenotype_command", required=True)
+
+    p_add = pheno_sub.add_parser("add", help="Add or update one SQL-defined phenotype column (or a directory of *.sql)")
+    p_add.add_argument(
+        "--db-url",
+        "-d",
+        default=DEFAULT_DB_URL,
+        help=f"SQLite DB path or URL (default: {DEFAULT_DB_URL})",
+    )
+    add_src = p_add.add_mutually_exclusive_group(required=True)
+    add_src.add_argument("--sql-file", "-s", help="Path to a single-code phenotype .sql file")
+    add_src.add_argument(
+        "--dir",
+        nargs="?",
+        const=str(PHENOTYPES_DIR),
+        help=f"Directory of *.sql phenotype files to batch-add (default when flag passed: {PHENOTYPES_DIR})",
+    )
+    add_src.add_argument("--sql", help="Inline read-only SELECT query returning (person_id, phenotype_value)")
+    p_add.add_argument("--code", help="Phenotype column code (optional if declared in SQL file header)")
+    p_add.add_argument(
+        "--type",
+        dest="variable_type",
+        choices=["binary", "continuous", "categorical"],
+        help="Variable type (optional if declared in SQL file header)",
+    )
+    p_add.add_argument("--name", help="Human-readable phenotype name (optional override)")
+    p_add.add_argument("--units", help="Units for continuous traits (optional override)")
+    p_add.add_argument("--description", help="Short clinical description (optional override)")
+
+    p_rm = pheno_sub.add_parser("remove", help="Remove a phenotype column from the registry and gwas_phenotypes")
+    p_rm.add_argument(
+        "--db-url",
+        "-d",
+        default=DEFAULT_DB_URL,
+        help=f"SQLite DB path or URL (default: {DEFAULT_DB_URL})",
+    )
+    p_rm.add_argument("--code", required=True, help="Phenotype column code to remove (e.g. 11_11_01)")
+
+    p_ls = pheno_sub.add_parser("list", help="List all registered phenotype columns and coverage counts")
+    p_ls.add_argument(
+        "--db-url",
+        "-d",
+        default=DEFAULT_DB_URL,
+        help=f"SQLite DB path or URL (default: {DEFAULT_DB_URL})",
+    )
+
+    p_exp = pheno_sub.add_parser("export", help="Export gwas_phenotypes to a REGENIE/snipar-ready TSV file")
+    p_exp.add_argument(
+        "--db-url",
+        "-d",
+        default=DEFAULT_DB_URL,
+        help=f"SQLite DB path or URL (default: {DEFAULT_DB_URL})",
+    )
+    p_exp.add_argument("--out", "-o", required=True, help="Output TSV path (outside Git, e.g. /tmp/gwas_phenos.txt)")
+    p_exp.add_argument(
+        "--all-participants",
+        action="store_true",
+        help="Include ungenotyped participants (default exports genotyped participants only)",
+    )
+    p_exp.add_argument(
+        "--include-patid",
+        action="store_true",
+        help="Include PATID column alongside FID/IID in exported TSV",
+    )
+    p_exp.add_argument("--codes", nargs="+", help="Optional subset of phenotype codes to export")
+    p_exp.add_argument("--missing", default="NA", help="Missing value string (default: NA)")
 
     prof_p = sub.add_parser(
         "profile-medications",
@@ -148,7 +246,7 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
 
     if args.command == "run":
-        counts = run_stage1_etl(
+        counts = construct_db(
             input_data=args.input,
             db_url=args.db_url,
             id_bridge_path=args.id_bridge,
@@ -157,9 +255,49 @@ def main(argv: list[str] | None = None) -> None:
             nrows=args.nrows,
         )
         print(json.dumps({"status": "ok", "db_url": args.db_url, "loaded_rows": counts}, indent=2))
+    elif args.command == "build-bridge":
+        report = generate_bridge_file(
+            baseline_path=args.input,
+            fam_path=args.fam,
+            out_path=args.out,
+            pattern=args.pattern,
+        )
+        print(json.dumps(report, indent=2))
     elif args.command == "cohorts":
         summary = run_cohorts_summary(args.db_url, cohorts_dir=args.cohorts_dir)
         print(json.dumps({"db_url": args.db_url, "cohort_counts": summary}, indent=2))
+    elif args.command == "phenotype":
+        if args.phenotype_command == "add":
+            if args.dir is not None:
+                report = add_phenotype_directory(args.db_url, phenotypes_dir=args.dir)
+            else:
+                report = add_phenotype_column(
+                    args.db_url,
+                    sql_path=args.sql_file,
+                    sql_query=args.sql,
+                    code=args.code,
+                    name=args.name,
+                    variable_type=args.variable_type,
+                    units=args.units,
+                    description=args.description,
+                )
+            print(json.dumps(report, indent=2))
+        elif args.phenotype_command == "remove":
+            report = remove_phenotype_column(args.db_url, code=args.code)
+            print(json.dumps(report, indent=2))
+        elif args.phenotype_command == "list":
+            items = list_phenotypes(args.db_url)
+            print(json.dumps({"db_url": args.db_url, "phenotypes": items}, indent=2))
+        elif args.phenotype_command == "export":
+            report = export_gwas_phenotypes(
+                args.db_url,
+                out_path=args.out,
+                genotyped_only=not args.all_participants,
+                codes=args.codes,
+                missing_value=args.missing,
+                include_patid=args.include_patid,
+            )
+            print(json.dumps(report, indent=2))
     elif args.command == "profile-medications":
         raw_rows = read_mcps_table(args.input, nrows=args.nrows)
         cmap = load_concept_map(args.map_path)

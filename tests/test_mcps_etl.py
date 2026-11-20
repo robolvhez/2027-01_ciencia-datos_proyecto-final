@@ -8,6 +8,14 @@ from pathlib import Path
 import pytest
 
 from src.python.mcps_etl.__main__ import main, run_cohorts_summary
+from src.python.mcps_etl.build_bridge import (
+    build_patid_iid_bridge,
+    extract_patid_from_iid,
+    generate_bridge_file,
+    read_baseline_patids,
+    resolve_bridge_delimiter,
+    write_id_bridge,
+)
 from src.python.mcps_etl.id_linkage import (
     EXPECTED_GENOTYPED_INDIVIDUALS,
     build_genomic_id_map,
@@ -16,12 +24,24 @@ from src.python.mcps_etl.id_linkage import (
     read_plink_fam,
     validate_regid_linkage,
 )
-from src.python.mcps_etl.load import run_stage1_etl
+from src.python.mcps_etl.load import construct_db
 from src.python.mcps_etl.mapper import (
     MIN_MEDICATION_MENTION_COUNT,
     profile_medication_terms,
     suggest_mappings,
     verify_concepts_against_athena,
+)
+from src.python.mcps_etl.phenotypes import (
+    add_phenotype_column,
+    add_phenotype_directory,
+    export_gwas_phenotypes,
+    list_phenotypes,
+    parse_phenotype_sql_file,
+    remove_phenotype_column,
+    strip_sql_comments,
+    validate_phenotype_code,
+    validate_readonly_select_sql,
+    validate_variable_type,
 )
 from src.python.mcps_etl.transform import compute_drug_exposure, normalize_medication_text
 
@@ -256,7 +276,7 @@ def test_etl_and_all_ten_single_code_sql_cohorts(tmp_path: Path) -> None:
         },
     ]
 
-    counts = run_stage1_etl(input_data=sample_rows, db_url=db_url)
+    counts = construct_db(input_data=sample_rows, db_url=db_url)
     assert counts["person"] == 3
     assert counts["genomic_id_map"] == 3
     assert counts["drug_exposure"] == 10
@@ -368,3 +388,392 @@ def test_cli_run_with_fam_and_profile_medications(tmp_path: Path) -> None:
             (1, "MCPS_MCPSRGN000001_MEXB000300", 1),
             (2, None, 0),
         ]
+
+
+def test_build_patid_iid_bridge_strict_invariants(tmp_path: Path) -> None:
+    assert resolve_bridge_delimiter("bridge.tsv") == "\t"
+    assert resolve_bridge_delimiter("bridge.txt") == "\t"
+    assert resolve_bridge_delimiter("bridge.csv") == ","
+    with pytest.raises(ValueError, match="Unsupported bridge output format"):
+        resolve_bridge_delimiter("bridge.parquet")
+
+    assert extract_patid_from_iid("MCPS_MCPSRGN000001_MEXB000300") == "MCPSRGN000001"
+    assert extract_patid_from_iid("MCPS_MCPSRGN000002_MEXB000301-DUP") == "MCPSRGN000002"
+    assert parse_regeneron_iid("MCPS_MCPSRGN000002_MEXB000301-DUP") == ("MCPSRGN000002", "MEXB000301-DUP")
+
+    baseline_patids = [
+        "MCPSDS000007",  # ungenotyped DS participant
+        "MCPSRGN000001",  # genotyped
+        "MCPSRGN000002",  # genotyped (-DUP suffix)
+        "MCPSRGN000099",  # ungenotyped RGN participant
+    ]
+    fam_samples = {
+        "MCPS_MCPSRGN000001_MEXB000300": "MCPS_MCPSRGN000001_MEXB000300",
+        "MCPS_MCPSRGN000002_MEXB000301-DUP": "MCPS_MCPSRGN000002_MEXB000301-DUP",
+    }
+
+    rows, summary = build_patid_iid_bridge(baseline_patids, fam_samples)
+    assert [r["PATID"] for r in rows] == baseline_patids
+    assert rows == [
+        {"PATID": "MCPSDS000007", "IID": "", "FID": ""},
+        {"PATID": "MCPSRGN000001", "IID": "MCPS_MCPSRGN000001_MEXB000300", "FID": "MCPS_MCPSRGN000001_MEXB000300"},
+        {
+            "PATID": "MCPSRGN000002",
+            "IID": "MCPS_MCPSRGN000002_MEXB000301-DUP",
+            "FID": "MCPS_MCPSRGN000002_MEXB000301-DUP",
+        },
+        {"PATID": "MCPSRGN000099", "IID": "", "FID": ""},
+    ]
+    assert summary["n_baseline_patids"] == 4
+    assert summary["n_fam_iids"] == 2
+    assert summary["n_matched_genotyped"] == 2
+    assert summary["n_ungenotyped"] == 2
+    assert summary["matches_expected_140831"] is False
+
+    # Round-trip through write_id_bridge -> read_id_bridge -> build_genomic_id_map
+    for suffix in (".tsv", ".csv"):
+        out_path = tmp_path / f"bridge{suffix}"
+        write_id_bridge(rows, out_path)
+        parsed_bridge = read_id_bridge(out_path)
+        assert len(parsed_bridge) == 2
+        assert parsed_bridge["MCPSRGN000001"] == ("MCPS_MCPSRGN000001_MEXB000300", "MCPS_MCPSRGN000001_MEXB000300")
+        assert parsed_bridge["MCPSRGN000002"] == (
+            "MCPS_MCPSRGN000002_MEXB000301-DUP",
+            "MCPS_MCPSRGN000002_MEXB000301-DUP",
+        )
+        gmap = build_genomic_id_map(
+            [{"PATID": p} for p in baseline_patids],
+            id_bridge=parsed_bridge,
+            fam_samples=fam_samples,
+        )
+        assert [r["is_genotyped"] for r in gmap] == [0, 1, 1, 0]
+        assert gmap[2]["mexb_id"] == "MEXB000301-DUP"
+
+
+def test_build_patid_iid_bridge_rejects_violations(tmp_path: Path) -> None:
+    # Duplicate PATID in baseline_patids
+    with pytest.raises(ValueError, match="Duplicate PATID"):
+        build_patid_iid_bridge(["MCPSRGN000001", "MCPSRGN000001"], {})
+
+    # Empty PATID in baseline_patids
+    with pytest.raises(ValueError, match="Empty PATID"):
+        build_patid_iid_bridge(["MCPSRGN000001", ""], {})
+
+    # Non-matching genotype IID
+    with pytest.raises(ValueError, match="did not match PATID extraction pattern"):
+        build_patid_iid_bridge(["MCPSRGN000001"], {"BAD_FORMAT_ID": "BAD_FORMAT_ID"})
+
+    # Two distinct .fam IIDs mapping to the same PATID
+    with pytest.raises(ValueError, match="Duplicate PATID 'MCPSRGN000001' extracted"):
+        build_patid_iid_bridge(
+            ["MCPSRGN000001"],
+            {
+                "MCPS_MCPSRGN000001_MEXB000300": "MCPS_MCPSRGN000001_MEXB000300",
+                "MCPS_MCPSRGN000001_MEXB000301-DUP": "MCPS_MCPSRGN000001_MEXB000301-DUP",
+            },
+        )
+
+    # Orphan .fam IID absent from baseline PATIDs
+    with pytest.raises(ValueError, match="could not be matched to any baseline PATID"):
+        build_patid_iid_bridge(
+            ["MCPSRGN000001"],
+            {
+                "MCPS_MCPSRGN000001_MEXB000300": "MCPS_MCPSRGN000001_MEXB000300",
+                "MCPS_MCPSRGN999999_MEXB999999": "MCPS_MCPSRGN999999_MEXB999999",
+            },
+        )
+
+    # Duplicate PATID in baseline CSV file
+    dup_csv = tmp_path / "dup_baseline.csv"
+    dup_csv.write_text("PATID,AGE\nMCPSRGN000001,50\nMCPSRGN000001,51\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="Duplicate PATID"):
+        read_baseline_patids(dup_csv)
+
+    # Duplicate PATID in existing bridge file even when IID is empty
+    dup_empty_bridge = tmp_path / "dup_empty_bridge.tsv"
+    dup_empty_bridge.write_text(
+        "PATID\tIID\tFID\nMCPSDS000007\t\t\nMCPSDS000007\t\t\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="Duplicate PATID in ID bridge"):
+        read_id_bridge(dup_empty_bridge)
+
+
+def test_cli_build_bridge_then_run(tmp_path: Path) -> None:
+    csv_path = tmp_path / "baseline.csv"
+    csv_path.write_text(
+        "PATID,YEAR_RECRUITED,MONTH_RECRUITED,AGE,MALE,COYOACAN\n"
+        "MCPSRGN000001,2000,6,58,0,1\n"
+        "MCPSDS000007,2001,4,46,1,0\n"
+        "MCPSRGN000002,2001,5,52,1,1\n",
+        encoding="utf-8",
+    )
+    fam_path = tmp_path / "cohort.fam"
+    fam_path.write_text(
+        "MCPS_MCPSRGN000001_MEXB000300 MCPS_MCPSRGN000001_MEXB000300 0 0 2 -9\n"
+        "MCPS_MCPSRGN000002_MEXB000301-DUP MCPS_MCPSRGN000002_MEXB000301-DUP 0 0 1 -9\n",
+        encoding="utf-8",
+    )
+    bridge_path = tmp_path / "bridge.tsv"
+    db_path = tmp_path / "bridged_omop.db"
+
+    report = generate_bridge_file(csv_path, fam_path, bridge_path)
+    assert report["n_baseline_patids"] == 3
+    assert report["n_matched_genotyped"] == 2
+    assert report["n_ungenotyped"] == 1
+
+    # Also invoke via main CLI subcommand and feed directly into `run`
+    cli_bridge = tmp_path / "cli_bridge.tsv"
+    main(["build-bridge", "-i", str(csv_path), "-f", str(fam_path), "-o", str(cli_bridge)])
+    main(
+        [
+            "run",
+            "-i",
+            str(csv_path),
+            "--id-bridge",
+            str(cli_bridge),
+            "-f",
+            str(fam_path),
+            "-d",
+            f"sqlite:///{db_path}",
+        ]
+    )
+
+    with sqlite3.connect(db_path) as conn:
+        gmap = conn.execute(
+            "SELECT person_id, patid, genotype_iid, is_genotyped FROM genomic_id_map ORDER BY person_id"
+        ).fetchall()
+        assert gmap == [
+            (1, "MCPSRGN000001", "MCPS_MCPSRGN000001_MEXB000300", 1),
+            (2, "MCPSDS000007", None, 0),
+            (3, "MCPSRGN000002", "MCPS_MCPSRGN000002_MEXB000301-DUP", 1),
+        ]
+
+
+def test_phenotype_validators_and_sql_parser(tmp_path: Path) -> None:
+    assert validate_phenotype_code("17_03_01") == "17_03_01"
+    assert validate_phenotype_code("fasting_duration_q") == "fasting_duration_q"
+    with pytest.raises(ValueError, match="Invalid phenotype code"):
+        validate_phenotype_code("17-03;DROP TABLE person")
+    with pytest.raises(ValueError, match="reserved base column"):
+        validate_phenotype_code("IID")
+    with pytest.raises(ValueError, match="reserved base column"):
+        validate_phenotype_code("age")
+
+    assert validate_variable_type("BINARY") == "binary"
+    assert validate_variable_type("continuous") == "continuous"
+    assert validate_variable_type("categorical") == "categorical"
+    with pytest.raises(ValueError, match="Invalid variable_type"):
+        validate_variable_type("text")
+
+    assert strip_sql_comments("/* header */\n-- note\nSELECT 1; ") == "SELECT 1"
+    assert validate_readonly_select_sql("WITH cte AS (SELECT 1) SELECT * FROM cte;") == "WITH cte AS (SELECT 1) SELECT * FROM cte"
+    with pytest.raises(ValueError, match="read-only SELECT"):
+        validate_readonly_select_sql("DELETE FROM person")
+    with pytest.raises(ValueError, match="single SELECT statement"):
+        validate_readonly_select_sql("SELECT 1; DROP TABLE person")
+
+    sql_file = tmp_path / "11_11_01_test.sql"
+    sql_file.write_text(
+        "/*\n"
+        "Catalogue Code:      11_11_01\n"
+        "Clinical Phenotype:  Body Mass Index\n"
+        "Variable Type:       continuous\n"
+        "Units:               kg/m2\n"
+        "*/\n"
+        "SELECT person_id, 25.5 AS phenotype_value FROM person;\n",
+        encoding="utf-8",
+    )
+    parsed = parse_phenotype_sql_file(sql_file)
+    assert parsed["code"] == "11_11_01"
+    assert parsed["name"] == "Body Mass Index"
+    assert parsed["variable_type"] == "continuous"
+    assert parsed["units"] == "kg/m2"
+    assert parsed["sql_query"] == "SELECT person_id, 25.5 AS phenotype_value FROM person"
+
+
+def test_gwas_phenotype_mart_add_remove_list_export_and_cli(tmp_path: Path) -> None:
+    db_path = tmp_path / "mart_omop.db"
+    db_url = f"sqlite:///{db_path}"
+
+    sample_rows = [
+        {
+            # Person 1: Genotyped female, Coyoacan, obese (BMI=32.0), controlled HTN on ACEi, non-diabetic
+            "PATID": "MCPSRGN000001",
+            "IID": "MCPS_MCPSRGN000001_MEXB000300",
+            "FID": "MCPS_MCPSRGN000001_MEXB000300",
+            "YEAR_RECRUITED": 2000,
+            "MONTH_RECRUITED": 12,
+            "MALE": 0,
+            "AGE": 60,
+            "COYOACAN": 1,
+            "EDUGP": 4,
+            "DRUG_A2": 1,
+            "HEIGHT": 150.0,
+            "WEIGHT": 72.0,  # BMI = 32.0
+            "SBP1": 128.0,
+            "SBP2": 126.0,
+            "DBP1": 80.0,
+            "DBP2": 78.0,
+            "BASE_HBA1C": 5.5,
+            "PC1": -0.18,
+        },
+        {
+            # Person 2: Genotyped male, Iztapalapa, T2D case on Metformin
+            "PATID": "MCPSRGN000002",
+            "IID": "MCPS_MCPSRGN000002_MEXB000301",
+            "FID": "MCPS_MCPSRGN000002_MEXB000301",
+            "YEAR_RECRUITED": 1999,
+            "MONTH_RECRUITED": 6,
+            "MALE": 1,
+            "AGE": 50,
+            "COYOACAN": 0,
+            "EDUGP": 10,
+            "DRUG_D1": 1,
+            "HEIGHT": 170.0,
+            "WEIGHT": 75.0,  # BMI = 25.9516
+            "SBP1": 120.0,
+            "DBP1": 78.0,
+            "BASE_HBA1C": 6.1,
+            "PC1": 1.25,
+        },
+        {
+            # Person 3: Genotyped probable T1D (dx age 20 < 35 & on insulin) -> 17_01_01=1, 17_03_01=NULL (excluded!)
+            "PATID": "MCPSRGN000003",
+            "IID": "MCPS_MCPSRGN000003_MEXB000302",
+            "FID": "MCPS_MCPSRGN000003_MEXB000302",
+            "YEAR_RECRUITED": 2000,
+            "MONTH_RECRUITED": 3,
+            "MALE": 1,
+            "AGE": 40,
+            "COYOACAN": 1,
+            "BASE_DIABETES": 1,
+            "BASE_DIABETES_DX": 4,  # 1980 -> age at dx 20
+            "DRUG_D3": 1,
+            "BASE_HBA1C": 8.4,
+        },
+        {
+            # Person 4: Ungenotyped participant (no IID -> excluded from default genotyped_only export)
+            "PATID": "MCPSDS000099",
+            "IID": None,
+            "FID": None,
+            "YEAR_RECRUITED": 2001,
+            "MONTH_RECRUITED": 5,
+            "MALE": 0,
+            "AGE": 45,
+            "COYOACAN": 0,
+            "HEIGHT": 160.0,
+            "WEIGHT": 64.0,  # BMI = 25.0
+        },
+    ]
+
+    construct_db(input_data=sample_rows, db_url=db_url)
+
+    # Batch-add all 10 starter phenotype SQL files
+    batch = add_phenotype_directory(db_url)
+    assert batch["status"] == "ok"
+    assert batch["gwas_phenotypes"]["n_rows"] == 4
+    assert batch["gwas_phenotypes"]["n_genotyped"] == 3
+    assert batch["gwas_phenotypes"]["n_phenotype_columns"] == 10
+
+    # Verify wide gwas_phenotypes table contents directly in SQLite
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = [dict(r) for r in conn.execute("SELECT * FROM gwas_phenotypes ORDER BY person_id").fetchall()]
+
+    assert len(rows) == 4
+    assert rows[0]["IID"] == "MCPS_MCPSRGN000001_MEXB000300"
+    assert rows[0]["AGE"] == 60
+    assert rows[0]["age_square"] == 3600
+    assert rows[0]["MALE"] == 0
+    assert rows[0]["02_01_01"] == 1.0
+    assert rows[0]["02_03_05"] == 4.0
+    assert rows[0]["11_11_01"] == 32.0
+    assert rows[0]["17_02_01"] == 1.0
+    assert rows[0]["17_03_01"] == 0.0
+
+    # Person 2: T2D case
+    assert rows[1]["17_01_01"] == 1.0
+    assert rows[1]["17_03_01"] == 1.0
+
+    # Person 3: Probable T1D -> broad diabetes = 1, QC T2D = NULL (excluded, NOT 0!)
+    assert rows[2]["17_01_01"] == 1.0
+    assert rows[2]["17_03_01"] is None
+    assert rows[2]["11_11_01"] is None
+
+    # Person 4: Ungenotyped -> present in DB table with is_genotyped=0 and raw BMI=25.0
+    assert rows[3]["is_genotyped"] == 0
+    assert rows[3]["IID"] is None
+    assert rows[3]["11_11_01"] == 25.0
+
+    # Validate error rejection for invalid binary values and duplicate person_id
+    with pytest.raises(ValueError, match="invalid non-binary value"):
+        add_phenotype_column(
+            db_url,
+            code="bad_bin",
+            variable_type="binary",
+            sql_query="SELECT person_id, 2 AS phenotype_value FROM person",
+        )
+    with pytest.raises(ValueError, match="duplicate person_id"):
+        add_phenotype_column(
+            db_url,
+            code="dup_pid",
+            variable_type="continuous",
+            sql_query="SELECT 1 AS person_id, 10.0 AS phenotype_value UNION ALL SELECT 1, 20.0",
+        )
+
+    # Test export (genotyped only, clean integer formatting for binary/categorical, NA for NULL)
+    tsv_out = tmp_path / "gwas_phenos.txt"
+    exp = export_gwas_phenotypes(db_url, tsv_out, genotyped_only=True, codes=["17_03_01", "11_11_01", "02_03_05"])
+    assert exp["n_rows"] == 3
+    lines = tsv_out.read_text(encoding="utf-8").splitlines()
+    assert lines[0].split("\t") == [
+        "FID",
+        "IID",
+        "AGE",
+        "age_square",
+        "MALE",
+        "PC1",
+        "PC2",
+        "PC3",
+        "PC4",
+        "PC5",
+        "PC6",
+        "PC7",
+        "17_03_01",
+        "11_11_01",
+        "02_03_05",
+    ]
+    # Person 1: 17_03_01='0', 11_11_01='32.0', 02_03_05='4'
+    assert lines[1].split("\t")[-3:] == ["0", "32.0", "4"]
+    # Person 3 (probable T1D): 17_03_01='NA', 11_11_01='NA', 02_03_05='NA'
+    assert lines[3].split("\t")[-3:] == ["NA", "NA", "NA"]
+
+    # Test programmatic column removal
+    rm = remove_phenotype_column(db_url, "11_01_01")
+    assert rm["removed_code"] == "11_01_01"
+    assert "11_01_01" not in rm["gwas_phenotypes"]["phenotype_columns"]
+    assert len(list_phenotypes(db_url)) == 9
+    with pytest.raises(ValueError, match="not registered"):
+        remove_phenotype_column(db_url, "11_01_01")
+
+    # Test CLI subcommands: phenotype add (inline SQL), list, remove, export
+    cli_tsv = tmp_path / "cli_gwas.txt"
+    main(
+        [
+            "phenotype",
+            "add",
+            "-d",
+            db_url,
+            "--code",
+            "custom_bmi_ge30",
+            "--type",
+            "binary",
+            "--sql",
+            "SELECT p.person_id, CASE WHEN m.value_as_number >= 30 THEN 1 WHEN m.value_as_number IS NOT NULL THEN 0 END AS phenotype_value FROM person p LEFT JOIN measurement m ON p.person_id = m.person_id AND m.measurement_concept_id = 3038553",
+        ]
+    )
+    main(["phenotype", "list", "-d", db_url])
+    main(["phenotype", "export", "-d", db_url, "-o", str(cli_tsv), "--codes", "custom_bmi_ge30"])
+    assert [line.split("\t")[-1] for line in cli_tsv.read_text(encoding="utf-8").splitlines()[1:]] == ["1", "0", "NA"]
+    main(["phenotype", "remove", "-d", db_url, "--code", "custom_bmi_ge30"])

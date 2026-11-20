@@ -87,7 +87,7 @@ def read_mcps_table(path: str | Path, nrows: int | None = None) -> list[dict[str
     return rows
 
 
-def run_stage1_etl(
+def construct_db(
     input_data: str | Path | Iterable[Mapping[str, Any]],
     db_url: str | Path,
     id_bridge_path: str | Path | None = None,
